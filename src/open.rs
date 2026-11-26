@@ -6,9 +6,13 @@
 //! 2. Make sure Herdr has a workspace for the repository.
 //! 3. If the item's branch is already open in Herdr, focus that workspace.
 //! 4. Otherwise let worktrunk switch to (or create) the worktree — pull
-//!    requests via `wt switch pr:N`, issues via a branch named by pi and,
-//!    optionally, started from a base branch the user picks — and open it
-//!    with `herdr worktree open`, labelled by pi.
+//!    requests via `wt switch pr:N`, issues via their linked branch or a new
+//!    branch named by pi and, optionally, started from a base branch the user
+//!    picks — and open it with `herdr worktree open`, labelled by pi.
+//!
+//! An issue is linked to its branch in the repository's git config. The
+//! plugin links the branches it creates, and the user can link an existing
+//! branch instead.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -21,11 +25,11 @@ use crate::github::{Item, Kind};
 use crate::herdr::{Herdr, WorktreeList};
 use crate::naming::unique_branch;
 use crate::pi;
-use crate::picker::BaseCandidate;
+use crate::picker::{BaseCandidate, BranchCandidate};
 use crate::runner::{Cmd, Io, Runner};
 
-/// Git config variable (`branch.<name>.herdr-gh-wt-issue`) that records which
-/// issue a branch was created for. Git drops it together with the branch.
+/// Git config variable (`branch.<name>.herdr-gh-wt-issue`) that links a
+/// branch to an issue. Git drops it together with the branch.
 pub const ISSUE_CONFIG_KEY: &str = "herdr-gh-wt-issue";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -43,6 +47,23 @@ pub enum Outcome {
 /// `None` cancels.
 pub type ChooseBase<'a> = &'a mut dyn FnMut(&[BaseCandidate]) -> Result<Option<String>>;
 
+/// Asks the user which local branch to link to an issue; `None` cancels.
+pub type ChooseBranch<'a> = &'a mut dyn FnMut(&[BranchCandidate]) -> Result<Option<String>>;
+
+/// How an issue's branch is settled. Pull requests always use their own
+/// branch.
+pub enum IssueBranch<'a> {
+    /// The issue's linked branch; without one, a new branch from the
+    /// repository's default branch.
+    Default,
+    /// Like `Default`, but a new branch starts from a base that the function
+    /// picks.
+    FromBase(ChooseBase<'a>),
+    /// Link the issue to an existing local branch that the function picks,
+    /// in place of any branch it was linked to, and open that branch.
+    Link(ChooseBranch<'a>),
+}
+
 pub struct Opener {
     pub runner: Arc<dyn Runner + Send + Sync>,
     pub herdr: Herdr,
@@ -54,15 +75,14 @@ pub struct Opener {
 impl Opener {
     /// Open `item`, reporting progress through `log`.
     pub fn open(&self, item: &Item, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
-        self.open_with(item, None, log)
+        self.open_with(item, IssueBranch::Default, log)
     }
 
-    /// Like [`Opener::open`]; when a new issue branch is created,
-    /// `choose_base` picks the branch it starts from.
+    /// Like [`Opener::open`], settling an issue's branch as `how` says.
     pub fn open_with(
         &self,
         item: &Item,
-        choose_base: Option<ChooseBase>,
+        mut how: IssueBranch,
         log: &mut dyn FnMut(&str),
     ) -> Result<Outcome> {
         let runner = &*self.runner;
@@ -78,11 +98,21 @@ impl Opener {
         };
 
         // The branch the item lives on, when it is known up front.
-        let known_branch = match item.kind {
-            Kind::PullRequest => item.head_ref.clone(),
-            Kind::Issue => self.recorded_issue_branch(&root, item.number)?,
+        let known_branch = match (item.kind, &mut how) {
+            (Kind::PullRequest, _) => item.head_ref.clone(),
+            (Kind::Issue, IssueBranch::Link(choose)) => {
+                let candidates = self.branch_candidates(&root, &list)?;
+                let Some(branch) = choose(&candidates)? else {
+                    return Ok(Outcome::Cancelled);
+                };
+                self.link_issue_branch(&root, &branch, item.number, log)?;
+                Some(branch)
+            }
+            (Kind::Issue, _) => self.recorded_issue_branch(&root, item.number)?,
         };
-        if let (Kind::Issue, Some(branch), Some(_)) = (item.kind, &known_branch, &choose_base) {
+        if let (Kind::Issue, Some(branch), IssueBranch::FromBase(_)) =
+            (item.kind, &known_branch, &how)
+        {
             log(&format!(
                 "Issue #{} already has branch {branch}; a base branch only applies to new branches",
                 item.number
@@ -100,12 +130,12 @@ impl Opener {
             (Kind::PullRequest, _) => vec![format!("pr:{}", item.number)],
             (Kind::Issue, Some(branch)) => vec![branch],
             (Kind::Issue, None) => {
-                let base = match choose_base {
-                    Some(choose) => match self.ask_base(&root, choose, log)? {
+                let base = match how {
+                    IssueBranch::FromBase(choose) => match self.ask_base(&root, choose, log)? {
                         Some(base) => Some(base),
                         None => return Ok(Outcome::Cancelled),
                     },
-                    None => None,
+                    IssueBranch::Default | IssueBranch::Link(_) => None,
                 };
                 let mut target = vec![
                     "--create".to_string(),
@@ -220,28 +250,40 @@ impl Opener {
             .is_ok_and(|out| out.success)
     }
 
-    /// The existing branch previously created for issue `number`, if any.
-    fn recorded_issue_branch(&self, root: &Path, number: u64) -> Result<Option<String>> {
+    /// Every (branch, issue number) link in the repository's git config.
+    fn issue_records(&self, root: &Path) -> Result<Vec<(String, u64)>> {
         let pattern = format!("^branch\\..*\\.{ISSUE_CONFIG_KEY}$");
         let out = self
             .runner
             .run(&git(root, &["config", "--get-regexp", &pattern]))?;
         if !out.success {
             // git exits with 1 when nothing matches.
-            return Ok(None);
+            return Ok(Vec::new());
         }
         let suffix = format!(".{ISSUE_CONFIG_KEY}");
-        let number = number.to_string();
         Ok(out
             .stdout
             .lines()
-            .filter_map(|line| line.split_once(' '))
-            .filter(|(_, value)| value.trim() == number)
-            .filter_map(|(key, _)| key.strip_prefix("branch.")?.strip_suffix(&suffix))
-            .find(|branch| self.branch_exists(root, branch))
-            .map(str::to_string))
+            .filter_map(|line| {
+                let (key, value) = line.split_once(' ')?;
+                let branch = key.strip_prefix("branch.")?.strip_suffix(&suffix)?;
+                Some((branch.to_string(), value.trim().parse().ok()?))
+            })
+            .collect())
     }
 
+    /// The existing branch linked to issue `number`, if any.
+    fn recorded_issue_branch(&self, root: &Path, number: u64) -> Result<Option<String>> {
+        Ok(self
+            .issue_records(root)?
+            .into_iter()
+            .filter(|&(_, n)| n == number)
+            .map(|(branch, _)| branch)
+            .find(|branch| self.branch_exists(root, branch)))
+    }
+
+    /// Link a branch the plugin just created to its issue. A failure only
+    /// costs the link, so it is reported and otherwise ignored.
     fn record_issue_branch(
         &self,
         root: &Path,
@@ -249,15 +291,83 @@ impl Opener {
         number: u64,
         log: &mut dyn FnMut(&str),
     ) {
-        let key = format!("branch.{branch}.{ISSUE_CONFIG_KEY}");
-        let recorded = self
-            .runner
-            .stdout(&git(root, &["config", &key, &number.to_string()]));
+        let recorded = self.runner.stdout(&git(
+            root,
+            &["config", &issue_key(branch), &number.to_string()],
+        ));
         if let Err(err) = recorded {
             log(&format!(
                 "Could not record the issue on branch {branch}: {err:#}"
             ));
         }
+    }
+
+    /// Link `branch` to issue `number`, unlinking any other branch of that
+    /// issue. A branch has one issue, so another issue's link is replaced.
+    fn link_issue_branch(
+        &self,
+        root: &Path,
+        branch: &str,
+        number: u64,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<()> {
+        for (other, linked) in self.issue_records(root)? {
+            if other == branch && linked != number {
+                log(&format!(
+                    "Branch {branch} was linked to issue #{linked}; linking it to #{number} instead"
+                ));
+            } else if other != branch && linked == number {
+                self.runner
+                    .stdout(&git(root, &["config", "--unset-all", &issue_key(&other)]))
+                    .with_context(|| format!("could not unlink branch {other}"))?;
+                log(&format!("Unlinked branch {other}"));
+            }
+        }
+        self.runner
+            .stdout(&git(
+                root,
+                &["config", &issue_key(branch), &number.to_string()],
+            ))
+            .with_context(|| format!("could not link branch {branch}"))?;
+        log(&format!("Linked branch {branch} to issue #{number}"));
+        Ok(())
+    }
+
+    /// Local branches an issue can be linked to: branches checked out in a
+    /// linked worktree first, then the others, each group most recently
+    /// committed first.
+    fn branch_candidates(&self, root: &Path, list: &WorktreeList) -> Result<Vec<BranchCandidate>> {
+        let refs = self.runner.stdout(&git(
+            root,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname)",
+                "refs/heads",
+            ],
+        ))?;
+        let records = self.issue_records(root)?;
+        let (mut candidates, others): (Vec<_>, Vec<_>) = refs
+            .lines()
+            .filter_map(|reference| reference.trim().strip_prefix("refs/heads/"))
+            .map(|name| {
+                let worktree = list
+                    .worktrees
+                    .iter()
+                    .find(|w| w.branch.as_deref() == Some(name));
+                BranchCandidate {
+                    name: name.to_string(),
+                    worktree: worktree.map(|w| w.path.clone()),
+                    open: worktree.is_some_and(|w| w.open_workspace_id.is_some()),
+                    issue: records
+                        .iter()
+                        .find(|(branch, _)| branch == name)
+                        .map(|&(_, n)| n),
+                }
+            })
+            .partition(|c| c.worktree.as_deref().is_some_and(|p| !same_path(p, root)));
+        candidates.extend(others);
+        Ok(candidates)
     }
 
     /// Refresh the remote-tracking branches and let `choose` pick a base.
@@ -391,6 +501,11 @@ impl Opener {
 /// `git ARGS...` run inside `root`.
 fn git(root: &Path, args: &[&str]) -> Cmd {
     Cmd::new("git", args.iter().copied()).cwd(root)
+}
+
+/// The git config key that links `branch` to an issue.
+fn issue_key(branch: &str) -> String {
+    format!("branch.{branch}.{ISSUE_CONFIG_KEY}")
 }
 
 #[derive(Debug, Deserialize)]
@@ -582,13 +697,23 @@ mod tests {
                     )
                 }
             }
+            ("git", ["config", "--unset-all", key]) => {
+                let branch = issue_key_branch(key);
+                let before = w.issue_map.len();
+                w.issue_map.retain(|(b, _)| b != branch);
+                Output {
+                    // git exits with 5 when there is nothing to unset.
+                    success: w.issue_map.len() < before,
+                    ..Output::default()
+                }
+            }
             ("git", ["config", key, value]) => {
-                let branch = key
-                    .strip_prefix("branch.")
-                    .and_then(|k| k.strip_suffix(&format!(".{ISSUE_CONFIG_KEY}")))
-                    .expect("unexpected git config key");
-                w.issue_map
-                    .push((branch.to_string(), value.parse().unwrap()));
+                let branch = issue_key_branch(key).to_string();
+                let number = value.parse().unwrap();
+                match w.issue_map.iter_mut().find(|(b, _)| *b == branch) {
+                    Some(entry) => entry.1 = number,
+                    None => w.issue_map.push((branch, number)),
+                }
                 Output::ok("")
             }
             ("git", ["fetch", "--all", "--quiet"]) => {
@@ -609,6 +734,22 @@ mod tests {
                     "refs/remotes",
                 ],
             ) => Output::ok(w.refs.join("\n")),
+            (
+                "git",
+                [
+                    "for-each-ref",
+                    "--sort=-committerdate",
+                    "--format=%(refname)",
+                    "refs/heads",
+                ],
+            ) => Output::ok(
+                w.refs
+                    .iter()
+                    .filter(|r| r.starts_with("refs/heads/"))
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
             (
                 "git",
                 [
@@ -675,6 +816,13 @@ mod tests {
         }
     }
 
+    /// `branch.<name>.herdr-gh-wt-issue` -> `<name>`
+    fn issue_key_branch(key: &str) -> &str {
+        key.strip_prefix("branch.")
+            .and_then(|k| k.strip_suffix(&format!(".{ISSUE_CONFIG_KEY}")))
+            .expect("unexpected git config key")
+    }
+
     fn pr() -> Item {
         Item {
             kind: Kind::PullRequest,
@@ -712,14 +860,14 @@ mod tests {
     }
 
     fn run(world: World, item: &Item) -> Run {
-        run_with(world, item, None)
+        run_with(world, item, IssueBranch::Default)
     }
 
-    fn run_with(world: World, item: &Item, choose_base: Option<ChooseBase>) -> Run {
-        run_full(world, item, choose_base, true)
+    fn run_with(world: World, item: &Item, how: IssueBranch) -> Run {
+        run_full(world, item, how, true)
     }
 
-    fn run_full(world: World, item: &Item, choose_base: Option<ChooseBase>, focus: bool) -> Run {
+    fn run_full(world: World, item: &Item, how: IssueBranch, focus: bool) -> Run {
         let world = Arc::new(Mutex::new(world));
         let shared = world.clone();
         let runner = Arc::new(FakeRunner::new(move |cmd| Ok(simulate(&shared, cmd))));
@@ -730,7 +878,7 @@ mod tests {
             focus,
         };
         let mut log = Vec::new();
-        let outcome = opener.open_with(item, choose_base, &mut |line| log.push(line.to_string()));
+        let outcome = opener.open_with(item, how, &mut |line| log.push(line.to_string()));
         let world = world.lock().unwrap().clone();
         Run {
             outcome,
@@ -815,7 +963,7 @@ mod tests {
 
     #[test]
     fn opens_in_the_background_when_focus_is_off() {
-        let r = run_full(World::default(), &pr(), None, false);
+        let r = run_full(World::default(), &pr(), IssueBranch::Default, false);
         assert!(
             matches!(r.outcome, Ok(Outcome::Opened { .. })),
             "{:?}",
@@ -832,7 +980,7 @@ mod tests {
         world
             .worktrees
             .push(("feat/x".into(), format!("{ROOT}.feat-x"), Some("w5".into())));
-        let r = run_full(world, &pr(), None, false);
+        let r = run_full(world, &pr(), IssueBranch::Default, false);
         assert_eq!(
             r.outcome.as_ref().unwrap(),
             &Outcome::AlreadyOpen {
@@ -1012,7 +1160,11 @@ mod tests {
             offered = candidates.to_vec();
             Ok(Some("origin/epic/x".to_string()))
         };
-        let r = run_with(World::default(), &issue(), Some(&mut choose));
+        let r = run_with(
+            World::default(),
+            &issue(),
+            IssueBranch::FromBase(&mut choose),
+        );
         assert!(
             matches!(r.outcome, Ok(Outcome::Opened { .. })),
             "{:?}",
@@ -1066,7 +1218,7 @@ mod tests {
             offered = candidates.to_vec();
             Ok(None)
         };
-        run_with(world, &issue(), Some(&mut choose));
+        run_with(world, &issue(), IssueBranch::FromBase(&mut choose));
         assert_eq!(offered[0], candidate("origin/main", true, true));
     }
 
@@ -1075,7 +1227,7 @@ mod tests {
         let r = run_with(
             World::default(),
             &issue(),
-            Some(&mut |_: &[BaseCandidate]| Ok(None)),
+            IssueBranch::FromBase(&mut |_: &[BaseCandidate]| Ok(None)),
         );
         assert_eq!(r.outcome.as_ref().unwrap(), &Outcome::Cancelled);
         assert!(!ran(&r, "wt "), "{:#?}", r.lines);
@@ -1090,7 +1242,7 @@ mod tests {
         let r = run_with(
             world,
             &issue(),
-            Some(
+            IssueBranch::FromBase(
                 &mut |_: &[BaseCandidate]| -> anyhow::Result<Option<String>> {
                     panic!("not asked")
                 },
@@ -1122,7 +1274,7 @@ mod tests {
             asked = true;
             Ok(Some("main".to_string()))
         };
-        let r = run_with(world, &issue(), Some(&mut choose));
+        let r = run_with(world, &issue(), IssueBranch::FromBase(&mut choose));
         assert!(asked);
         assert!(r.outcome.is_ok(), "{:?}", r.outcome);
         assert!(r.log.iter().any(|l| l.contains("fetch")), "{:?}", r.log);
@@ -1189,6 +1341,194 @@ mod tests {
             }
         );
         assert!(!ran(&r, "herdr worktree open"), "{:#?}", r.lines);
+    }
+
+    /// A repository with a worktree made outside the plugin (`login-fix`)
+    /// and a branch without a worktree (`old-try`).
+    fn world_with_branches() -> World {
+        let mut world = World::default();
+        world
+            .branches
+            .extend(["login-fix".into(), "old-try".into()]);
+        world
+            .worktrees
+            .push(("login-fix".into(), format!("{ROOT}.login-fix"), None));
+        world.refs = [
+            "refs/heads/old-try",
+            "refs/heads/main",
+            "refs/heads/login-fix",
+            "refs/remotes/origin/main",
+            "refs/remotes/origin/epic/x",
+        ]
+        .map(String::from)
+        .to_vec();
+        world
+    }
+
+    fn branch(
+        name: &str,
+        worktree: Option<&str>,
+        open: bool,
+        issue: Option<u64>,
+    ) -> BranchCandidate {
+        BranchCandidate {
+            name: name.into(),
+            worktree: worktree.map(PathBuf::from),
+            open,
+            issue,
+        }
+    }
+
+    #[test]
+    fn links_a_chosen_branch_to_an_issue_and_opens_it() {
+        let mut offered = Vec::new();
+        let mut choose = |candidates: &[BranchCandidate]| {
+            offered = candidates.to_vec();
+            Ok(Some("login-fix".to_string()))
+        };
+        let r = run_with(
+            world_with_branches(),
+            &issue(),
+            IssueBranch::Link(&mut choose),
+        );
+        assert_eq!(
+            offered,
+            vec![
+                branch("login-fix", Some(&format!("{ROOT}.login-fix")), false, None),
+                branch("old-try", None, false, None),
+                branch("main", Some(ROOT), true, None),
+            ],
+            "worktrees first, then the other local branches, newest first"
+        );
+        assert_eq!(r.world.issue_map, vec![("login-fix".to_string(), 42)]);
+        assert!(
+            ran(&r, "wt switch login-fix --no-cd --format=json"),
+            "{:#?}",
+            r.lines
+        );
+        assert!(
+            matches!(&r.outcome, Ok(Outcome::Opened { path, .. }) if *path == Path::new(&format!("{ROOT}.login-fix"))),
+            "{:?}",
+            r.outcome
+        );
+        assert!(
+            !r.lines
+                .iter()
+                .any(|l| l.starts_with("pi ") && l.contains("branch name")),
+            "no new branch name is generated"
+        );
+        assert!(
+            r.log
+                .iter()
+                .any(|l| l.contains("login-fix") && l.contains("#42")),
+            "{:?}",
+            r.log
+        );
+    }
+
+    #[test]
+    fn linking_moves_the_issue_off_its_previous_branch() {
+        let mut world = world_with_branches();
+        world.issue_map = vec![("old-try".into(), 42), ("main".into(), 7)];
+        let mut offered = Vec::new();
+        let mut choose = |candidates: &[BranchCandidate]| {
+            offered = candidates.to_vec();
+            Ok(Some("login-fix".to_string()))
+        };
+        let r = run_with(world, &issue(), IssueBranch::Link(&mut choose));
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert_eq!(offered[1], branch("old-try", None, false, Some(42)));
+        assert_eq!(offered[2].issue, Some(7));
+        assert_eq!(
+            r.world.issue_map,
+            vec![("main".to_string(), 7), ("login-fix".to_string(), 42)]
+        );
+    }
+
+    #[test]
+    fn linking_a_branch_of_another_issue_takes_it_over() {
+        let mut world = world_with_branches();
+        world.issue_map = vec![("login-fix".into(), 9)];
+        let r = run_with(
+            world,
+            &issue(),
+            IssueBranch::Link(&mut |_: &[BranchCandidate]| Ok(Some("login-fix".to_string()))),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert_eq!(r.world.issue_map, vec![("login-fix".to_string(), 42)]);
+        assert!(
+            r.log
+                .iter()
+                .any(|l| l.contains("login-fix") && l.contains("issue #9")),
+            "says which issue lost the branch: {:?}",
+            r.log
+        );
+    }
+
+    #[test]
+    fn linking_a_branch_open_in_herdr_focuses_it() {
+        let mut world = world_with_branches();
+        world.worktrees[1].2 = Some("w8".into());
+        let r = run_with(
+            world,
+            &issue(),
+            IssueBranch::Link(&mut |_: &[BranchCandidate]| Ok(Some("login-fix".to_string()))),
+        );
+        assert_eq!(
+            r.outcome.as_ref().unwrap(),
+            &Outcome::AlreadyOpen {
+                workspace_id: "w8".into()
+            }
+        );
+        assert_eq!(r.world.issue_map, vec![("login-fix".to_string(), 42)]);
+        assert!(!ran(&r, "wt "), "{:#?}", r.lines);
+    }
+
+    #[test]
+    fn linking_a_branch_without_a_worktree_creates_one() {
+        let r = run_with(
+            world_with_branches(),
+            &issue(),
+            IssueBranch::Link(&mut |_: &[BranchCandidate]| Ok(Some("old-try".to_string()))),
+        );
+        assert!(
+            matches!(r.outcome, Ok(Outcome::Opened { .. })),
+            "{:?}",
+            r.outcome
+        );
+        assert!(ran(&r, "wt switch old-try --no-cd"), "{:#?}", r.lines);
+        assert_eq!(r.world.issue_map, vec![("old-try".to_string(), 42)]);
+    }
+
+    #[test]
+    fn cancelling_the_link_choice_changes_nothing() {
+        let mut world = world_with_branches();
+        world.issue_map = vec![("old-try".into(), 42)];
+        let r = run_with(
+            world,
+            &issue(),
+            IssueBranch::Link(&mut |_: &[BranchCandidate]| Ok(None)),
+        );
+        assert_eq!(r.outcome.as_ref().unwrap(), &Outcome::Cancelled);
+        assert_eq!(r.world.issue_map, vec![("old-try".to_string(), 42)]);
+        assert!(!ran(&r, "wt "), "{:#?}", r.lines);
+        assert!(!ran(&r, "pi "), "{:#?}", r.lines);
+    }
+
+    #[test]
+    fn pull_requests_are_never_linked() {
+        let r = run_with(
+            World::default(),
+            &pr(),
+            IssueBranch::Link(
+                &mut |_: &[BranchCandidate]| -> anyhow::Result<Option<String>> {
+                    panic!("not asked")
+                },
+            ),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(ran(&r, "wt switch pr:7 "), "{:#?}", r.lines);
+        assert_eq!(r.world.issue_map, Vec::new());
     }
 }
 

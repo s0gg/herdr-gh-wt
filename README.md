@@ -32,15 +32,18 @@ workspace.
      branch, including branches from forks.
    - Issues: the first time, pi suggests a branch name such as
      `fix-login-timeout`, and the plugin runs `wt switch --create <name>`.
-     The plugin records which issue the branch belongs to in the repository's
-     git config (`branch.<name>.herdr-gh-wt-issue = <number>`). The next time
-     you pick the same issue, it switches to that branch instead of creating a
-     new one. Git removes the record when the branch is deleted.
+     The plugin links the branch to the issue in the repository's git config
+     (`branch.<name>.herdr-gh-wt-issue = <number>`). The next time you pick
+     the same issue, it switches to the linked branch instead of creating a
+     new one. Git removes the link when the branch is deleted.
    - Issues opened with <kbd>b</kbd> instead of <kbd>Enter</kbd>: before the
      plugin creates the branch, it runs `git fetch --all` and asks you for the
      base (parent) branch, then runs
      `wt switch --create <name> --base <base>`. See
      [Choosing a base branch](#choosing-a-base-branch).
+   - Issues opened with <kbd>l</kbd>: you pick an existing local branch, the
+     plugin links it to the issue, and worktrunk switches to it. See
+     [Linking an existing branch](#linking-an-existing-branch).
 5. **Open the worktree in Herdr.** The plugin runs
    `herdr worktree open --label <label> --focus`. pi writes the label (for
    example `PR #101 Add dark mode toggle`). pi starts working on the label
@@ -114,6 +117,7 @@ Then run `herdr server reload-config`.
 | `g` / `G`                   | First / last item of the list                   |
 | `Enter`                     | Open the item as a worktree workspace           |
 | `b`                         | Open an issue in a new branch, starting from a base branch you choose |
+| `l`                         | Link an issue to an existing branch you choose, and open it |
 | `o`                         | Open the item in the browser (`gh browse`)      |
 | `r`                         | Filter by repository                            |
 | `/`                         | Filter by text (repository, number, title, author, labels, branch) |
@@ -142,6 +146,27 @@ committed branches come first.
 
 If the issue already has a branch, the plugin opens that branch and says that
 the base was not used.
+
+### Linking an existing branch
+
+The plugin only knows the branches it created for an issue. If you already
+started on an issue in a branch of your own, for example with `wt switch
+--create`, select the issue and press <kbd>l</kbd> to link that branch instead
+of having the plugin create a new one.
+
+The plugin lists the repository's local branches: branches with a worktree
+first, then the others, each group with the most recently committed first.
+Each branch shows whether it has a worktree, whether that worktree is open in
+Herdr, and which issue it is linked to, if any.
+
+- Type to filter the list, use <kbd>↑</kbd>/<kbd>↓</kbd> to choose, and press
+  <kbd>Enter</kbd> to link the branch and open it.
+- <kbd>Esc</kbd> cancels and takes you back to the dashboard.
+
+An issue has one linked branch, and a branch belongs to one issue: linking
+replaces the issue's previous link, and a branch linked to another issue moves
+to this one. Use <kbd>l</kbd> again to fix a wrong link. From then on,
+<kbd>Enter</kbd> opens the linked branch.
 
 ## Configuration
 
@@ -235,9 +260,11 @@ scripts/e2e-sandbox.sh up      # prints how to read and drive the dashboard
 scripts/e2e-sandbox.sh down    # stops the session and deletes the sandbox
 ```
 
-The sandbox serves three assigned issues of a local `acme/app` repository,
-whose origin has a remote-only `epic/demo` branch to pick as a base. Pull
-requests are not part of it, because `wt switch pr:N` needs the real GitHub.
+The sandbox serves three assigned issues of a local `acme/app` repository.
+Its origin has a remote-only `epic/demo` branch to pick as a base, and the
+clone has a `login-timeout` worktree made outside the plugin, to link an issue
+to. Pull requests are not part of it, because `wt switch pr:N` needs the real
+GitHub.
 
 You can also run the dashboard outside a plugin pane with
 `cargo run -- dashboard`, from inside Herdr.
@@ -253,7 +280,7 @@ Source layout:
 
 - `src/github.rs`: the GraphQL query for review requests and assigned issues
 - `src/app.rs`: dashboard state and key handling
-- `src/base_picker.rs`: state of the base branch picker
+- `src/picker.rs`: state of the pickers for base branches and branches to link
 - `src/ui.rs`: rendering, with ratatui
 - `src/open.rs`: the open workflow (ghq, worktrunk, Herdr)
 - `src/pi.rs`: prompts and pi calls

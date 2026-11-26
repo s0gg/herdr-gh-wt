@@ -13,7 +13,7 @@ use ratatui::widgets::{
 
 use crate::app::{App, Load, Mode, Section, age, age_of, requested_via};
 use crate::github::{Item, Kind};
-use crate::picker::{BaseCandidate, Picker};
+use crate::picker::{BaseCandidate, BranchCandidate, Picker};
 
 const ACCENT: Color = Color::Cyan;
 
@@ -22,8 +22,31 @@ fn cells(n: usize) -> u16 {
     u16::try_from(n).unwrap_or(u16::MAX)
 }
 
-/// The full-screen picker for the base branch of a new issue branch.
-pub fn render_base_picker(frame: &mut Frame, picker: &Picker<BaseCandidate>, item: &Item) {
+/// What a full-screen picker shows besides its entries.
+struct PickerView<'a> {
+    /// The badge in front of the item, such as "New branch".
+    badge: &'a str,
+    /// One line under the title saying what to choose.
+    intro: &'a str,
+    /// Label of the query prompt.
+    prompt: &'a str,
+    /// Title of the list, before the count.
+    list_title: &'a str,
+    /// Shown instead of an empty list.
+    empty: String,
+    hints: &'a [(&'a str, &'a str)],
+}
+
+/// A full-screen picker for `item`: title, query prompt, the `entries`
+/// (already filtered) with the one at `cursor` highlighted, and key hints.
+fn render_picker(
+    frame: &mut Frame,
+    item: &Item,
+    view: &PickerView,
+    query: &str,
+    entries: Vec<ListItem>,
+    cursor: usize,
+) {
     let [header, prompt, list, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -34,21 +57,21 @@ pub fn render_base_picker(frame: &mut Frame, picker: &Picker<BaseCandidate>, ite
 
     let title = Text::from(vec![
         Line::from(vec![
-            Span::from(" New branch ")
+            Span::from(format!(" {} ", view.badge))
                 .bold()
                 .fg(Color::Black)
                 .bg(ACCENT),
             Span::from(format!(" {} {} ", item.repo, item.reference())).fg(Color::Blue),
             Span::from(item.title.clone()).bold(),
         ]),
-        Line::from(" Choose the base (parent) branch for the new branch.").dim(),
+        Line::from(format!(" {}", view.intro)).dim(),
     ]);
     frame.render_widget(Paragraph::new(title), header);
 
     frame.render_widget(
         Paragraph::new(Line::from(vec![
-            Span::from(" base ❯ ").fg(ACCENT).bold(),
-            Span::from(picker.query.as_str()),
+            Span::from(format!(" {} ❯ ", view.prompt)).fg(ACCENT).bold(),
+            Span::from(query),
             Span::from("█").fg(ACCENT),
         ])),
         prompt,
@@ -57,47 +80,103 @@ pub fn render_base_picker(frame: &mut Frame, picker: &Picker<BaseCandidate>, ite
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::new().fg(ACCENT))
-        .title(Line::from(format!(" Branches ({}) ", picker.filtered().len())).bold());
-    let filtered = picker.filtered();
-    if filtered.is_empty() {
-        let typed = picker.query.trim();
-        let message = if typed.is_empty() {
-            "  No branches found. Type a base such as pr:123 or a commit.".to_string()
-        } else {
-            format!("  No branch matches; enter uses \"{typed}\" as the base.")
-        };
-        frame.render_widget(Paragraph::new(message).dim().block(block), list);
+        .title(Line::from(format!(" {} ({}) ", view.list_title, entries.len())).bold());
+    if entries.is_empty() {
+        frame.render_widget(
+            Paragraph::new(format!("  {}", view.empty))
+                .dim()
+                .block(block),
+            list,
+        );
     } else {
-        let entries: Vec<ListItem> = filtered
-            .iter()
-            .map(|c| {
-                let mut spans = vec![Span::from(c.name.clone())];
-                if c.is_default {
-                    spans.push(Span::from("  default").fg(Color::Green));
-                }
-                if c.remote {
-                    spans.push(Span::from("  remote").fg(Color::Yellow));
-                }
-                ListItem::new(Line::from(spans))
-            })
-            .collect();
         let widget = List::new(entries)
             .block(block)
             .highlight_symbol("▶ ")
             .highlight_style(Style::new().bg(Color::DarkGray).bold());
-        let mut state = ListState::default().with_selected(Some(picker.cursor()));
+        let mut state = ListState::default().with_selected(Some(cursor));
         frame.render_stateful_widget(widget, list, &mut state);
     }
 
-    frame.render_widget(
-        Paragraph::new(hints(&[
+    frame.render_widget(Paragraph::new(hints(view.hints)), footer);
+}
+
+/// The full-screen picker for the base branch of a new issue branch.
+pub fn render_base_picker(frame: &mut Frame, picker: &Picker<BaseCandidate>, item: &Item) {
+    let typed = picker.query.trim();
+    let view = PickerView {
+        badge: "New branch",
+        intro: "Choose the base (parent) branch for the new branch.",
+        prompt: "base",
+        list_title: "Branches",
+        empty: if typed.is_empty() {
+            "No branches found. Type a base such as pr:123 or a commit.".to_string()
+        } else {
+            format!("No branch matches; enter uses \"{typed}\" as the base.")
+        },
+        hints: &[
             ("↑↓", "choose"),
             ("enter", "create from it"),
             ("alt-enter", "use the typed text"),
             ("esc", "cancel"),
-        ])),
-        footer,
-    );
+        ],
+    };
+    let entries = picker
+        .filtered()
+        .into_iter()
+        .map(|c| {
+            let mut spans = vec![Span::from(c.name.clone())];
+            if c.is_default {
+                spans.push(Span::from("  default").fg(Color::Green));
+            }
+            if c.remote {
+                spans.push(Span::from("  remote").fg(Color::Yellow));
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    render_picker(frame, item, &view, &picker.query, entries, picker.cursor());
+}
+
+/// The full-screen picker for the existing branch to link an issue to.
+pub fn render_branch_picker(frame: &mut Frame, picker: &Picker<BranchCandidate>, item: &Item) {
+    let view = PickerView {
+        badge: "Link branch",
+        intro: "Choose an existing branch for this issue; it is linked and opened.",
+        prompt: "branch",
+        list_title: "Local branches",
+        empty: if picker.entries.is_empty() {
+            "No local branches.".to_string()
+        } else {
+            "No branch matches.".to_string()
+        },
+        hints: &[
+            ("↑↓", "choose"),
+            ("enter", "link and open"),
+            ("esc", "cancel"),
+        ],
+    };
+    let entries = picker
+        .filtered()
+        .into_iter()
+        .map(|c| {
+            let mut spans = vec![Span::from(c.name.clone())];
+            if c.worktree.is_some() {
+                spans.push(Span::from("  worktree").fg(Color::Green));
+            }
+            if c.open {
+                spans.push(Span::from("  open").fg(ACCENT));
+            }
+            match c.issue {
+                Some(n) if n == item.number => {
+                    spans.push(Span::from("  linked").fg(Color::Magenta));
+                }
+                Some(n) => spans.push(Span::from(format!("  issue #{n}")).fg(Color::Yellow)),
+                None => {}
+            }
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    render_picker(frame, item, &view, &picker.query, entries, picker.cursor());
 }
 
 pub fn render(frame: &mut Frame, app: &App, now: SystemTime) {
@@ -203,10 +282,11 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
         Mode::Normal => hints(&[
             ("↑↓", "move"),
             ("tab", "section"),
-            ("enter", "open worktree"),
-            ("b", "issue from base"),
+            ("enter", "open"),
+            ("b", "from base"),
+            ("l", "link branch"),
             ("o", "browser"),
-            ("r", "repository"),
+            ("r", "repo"),
             ("/", "search"),
             ("R", "refresh"),
             ("q", "quit"),
@@ -219,7 +299,7 @@ fn hints(pairs: &[(&str, &str)]) -> Line<'static> {
     let mut spans = vec![Span::from(" ")];
     for (key, what) in pairs {
         spans.push(Span::from(key.to_string()).fg(ACCENT).bold());
-        spans.push(Span::from(format!(" {what}   ")).dim());
+        spans.push(Span::from(format!(" {what}  ")).dim());
     }
     Line::from(spans)
 }
@@ -559,10 +639,9 @@ mod tests {
         assert!(screen.contains("acme/lib"), "{screen}");
         assert!(screen.contains("@octocat"), "{screen}");
         assert!(screen.contains("3h"), "age column: {screen}");
-        assert!(
-            screen.contains("b issue from base"),
-            "footer hints: {screen}"
-        );
+        for hint in ["enter open", "b from base", "l link branch", "q quit"] {
+            assert!(screen.contains(hint), "footer hint {hint:?}: {screen}");
+        }
     }
 
     #[test]
@@ -669,6 +748,71 @@ mod tests {
         assert!(screen.contains("pr:123"), "{screen}");
         assert!(screen.contains("No branch matches"), "{screen}");
         draw_picker(&picker, 10, 3);
+    }
+
+    fn draw_branch_picker(picker: &Picker<BranchCandidate>, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        // Issue #3, which the "search-accents" branch is linked to.
+        let mut item = sample().assigned_issues[0].clone();
+        item.number = 3;
+        terminal
+            .draw(|frame| render_branch_picker(frame, picker, &item))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    fn line_with<'a>(screen: &'a str, needle: &str) -> &'a str {
+        screen
+            .lines()
+            .find(|l| l.contains(needle))
+            .unwrap_or_else(|| panic!("no line with {needle:?}: {screen}"))
+    }
+
+    #[test]
+    fn branch_picker_lists_branches_with_their_state() {
+        let picker = Picker::new(crate::picker::tests::branches());
+        let screen = draw_branch_picker(&picker, 100, 20);
+        assert!(screen.contains("Link branch"), "{screen}");
+        assert!(screen.contains("Issue #3"), "{screen}");
+        let open = line_with(&screen, "login-timeout");
+        assert!(open.contains("worktree") && open.contains("open"), "{open}");
+        let linked = line_with(&screen, "search-accents");
+        assert!(linked.contains("linked"), "{linked}");
+        let bare = line_with(&screen, "old-experiment");
+        assert!(!bare.contains("worktree"), "{bare}");
+        assert!(screen.contains("esc"), "hints: {screen}");
+    }
+
+    #[test]
+    fn branch_picker_names_the_issue_a_branch_belongs_to() {
+        let mut branches = crate::picker::tests::branches();
+        branches[1].issue = Some(8);
+        let screen = draw_branch_picker(&Picker::new(branches), 100, 20);
+        assert!(
+            line_with(&screen, "search-accents").contains("issue #8"),
+            "{screen}"
+        );
+    }
+
+    #[test]
+    fn branch_picker_says_when_nothing_matches() {
+        let mut picker = Picker::new(crate::picker::tests::branches());
+        for c in "zzz".chars() {
+            picker.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = draw_branch_picker(&picker, 100, 20);
+        assert!(screen.contains("No branch matches"), "{screen}");
+        let screen = draw_branch_picker(&Picker::new(vec![]), 100, 20);
+        assert!(screen.contains("No local branches"), "{screen}");
+        draw_branch_picker(&picker, 10, 3);
     }
 
     #[test]

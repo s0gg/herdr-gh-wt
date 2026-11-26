@@ -54,6 +54,8 @@ pub enum Action {
     Open(Item),
     /// Open an issue in a new branch created from a base branch the user picks.
     OpenWithBase(Item),
+    /// Link an issue to an existing branch the user picks, and open it.
+    Link(Item),
     Browse(Item),
 }
 
@@ -260,6 +262,16 @@ impl App {
                 Some(_) => {
                     self.notice = Some(
                         "A base branch only applies to issues; pull requests use their own branch"
+                            .to_string(),
+                    );
+                }
+                None => {}
+            },
+            KeyCode::Char('l') => match self.selected_item() {
+                Some(item) if item.kind == Kind::Issue => return Action::Link(item.clone()),
+                Some(_) => {
+                    self.notice = Some(
+                        "Only issues can be linked to a branch; pull requests use their own branch"
                             .to_string(),
                     );
                 }
@@ -628,6 +640,26 @@ pub(crate) mod tests {
     fn b_on_a_pull_request_explains_itself() {
         let mut app = loaded();
         assert_eq!(press(&mut app, &[KeyCode::Char('b')]), Action::None);
+        assert!(
+            app.notice.as_deref().is_some_and(|n| n.contains("issue")),
+            "{:?}",
+            app.notice
+        );
+    }
+
+    #[test]
+    fn l_links_an_issue_to_an_existing_branch() {
+        let mut app = loaded();
+        press(&mut app, &[KeyCode::Tab]);
+        assert!(
+            matches!(press(&mut app, &[KeyCode::Char('l')]), Action::Link(i) if i.number == 10)
+        );
+    }
+
+    #[test]
+    fn l_on_a_pull_request_explains_itself() {
+        let mut app = loaded();
+        assert_eq!(press(&mut app, &[KeyCode::Char('l')]), Action::None);
         assert!(
             app.notice.as_deref().is_some_and(|n| n.contains("issue")),
             "{:?}",

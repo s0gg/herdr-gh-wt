@@ -11,7 +11,8 @@
 # - a stub `gh` that serves a fixed set of assigned issues for acme/app, so
 #   no GitHub account or network is involved;
 # - a ghq root holding acme/app, cloned from a local bare "origin" that also
-#   has a remote-only branch (epic/demo) to pick as a base;
+#   has a remote-only branch (epic/demo) to pick as a base, and with a
+#   worktree made outside the plugin (login-timeout) to link an issue to;
 # - a config file with a short pi timeout. Set HERDR_GH_WT_PI_MODEL to try
 #   real names from pi; without a usable model, pi gives up after 5 seconds
 #   and the fallback names are used.
@@ -56,6 +57,8 @@ write_fixtures() {
 
   mkdir -p "$dir/ghq/github.com/acme" "$dir/bin"
   "${git[@]}" clone --quiet "$dir/origin.git" "$dir/ghq/github.com/acme/app"
+  "${git[@]}" -C "$dir/ghq/github.com/acme/app" worktree add --quiet \
+    -b login-timeout "$dir/ghq/github.com/acme/app.login-timeout"
 
   local issues='' n title
   for n in 1 2 3; do
@@ -127,6 +130,7 @@ The sandbox is up. Talk to it with:
   herdr pane read $pane --source visible     # see the dashboard
   herdr pane send-keys $pane enter           # open the selected issue
   herdr pane send-keys $pane b               # ... from a base branch you pick
+  herdr pane send-keys $pane l               # ... on an existing branch you link
   herdr workspace list                       # workspaces the dashboard opened
 
 Or look at it yourself: herdr session attach $session

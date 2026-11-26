@@ -4,15 +4,15 @@ use std::sync::{Arc, mpsc};
 use std::time::{Duration, SystemTime};
 
 use anyhow::Result;
-use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::{DefaultTerminal, Frame};
 
 use herdr_gh_wt::app::{Action, App, Load};
 use herdr_gh_wt::config::Config;
 use herdr_gh_wt::github::{self, Dashboard, Item};
 use herdr_gh_wt::herdr::{Herdr, PaneOpen};
-use herdr_gh_wt::open::{Opener, Outcome};
-use herdr_gh_wt::picker::{BaseCandidate, Picker, PickerAction};
+use herdr_gh_wt::open::{IssueBranch, Opener, Outcome};
+use herdr_gh_wt::picker::{BaseCandidate, BranchCandidate, Entry, Picker, PickerAction};
 use herdr_gh_wt::runner::{Runner, SystemRunner};
 use herdr_gh_wt::ui;
 
@@ -102,18 +102,20 @@ fn dashboard() -> Result<()> {
                 fetch(&tx);
             }
             Ok(Some(Action::Browse(item))) => browse(&runner, &item, &mut app),
-            Ok(Some(action @ (Action::Open(_) | Action::OpenWithBase(_)))) => {
-                let (item, choose_base) = match action {
-                    Action::OpenWithBase(item) => (item, true),
-                    Action::Open(item) => (item, false),
-                    _ => unreachable!(),
-                };
-                ratatui::restore();
-                match open(&opener, &item, choose_base) {
-                    AfterOpen::Exit => return Ok(()),
-                    AfterOpen::Back(notice) => app.notice = notice,
+            Ok(Some(Action::Open(item))) => {
+                if open_outside_tui(&opener, &item, Ask::Nothing, &mut app, &mut terminal) {
+                    return Ok(());
                 }
-                terminal = ratatui::init();
+            }
+            Ok(Some(Action::OpenWithBase(item))) => {
+                if open_outside_tui(&opener, &item, Ask::Base, &mut app, &mut terminal) {
+                    return Ok(());
+                }
+            }
+            Ok(Some(Action::Link(item))) => {
+                if open_outside_tui(&opener, &item, Ask::Branch, &mut app, &mut terminal) {
+                    return Ok(());
+                }
             }
             Err(err) => break Err(err),
         }
@@ -152,6 +154,36 @@ fn browse(runner: &Arc<dyn Runner + Send + Sync>, item: &Item, app: &mut App) {
     });
 }
 
+/// What the user is asked before an item opens.
+#[derive(Clone, Copy)]
+enum Ask {
+    Nothing,
+    /// The base branch of a new issue branch.
+    Base,
+    /// The existing branch to link an issue to.
+    Branch,
+}
+
+/// Leave the TUI to open `item`, then come back to it. Returns whether the
+/// dashboard should close instead.
+fn open_outside_tui(
+    opener: &Opener,
+    item: &Item,
+    ask: Ask,
+    app: &mut App,
+    terminal: &mut DefaultTerminal,
+) -> bool {
+    ratatui::restore();
+    match open(opener, item, ask) {
+        AfterOpen::Exit => true,
+        AfterOpen::Back(notice) => {
+            app.notice = notice;
+            *terminal = ratatui::init();
+            false
+        }
+    }
+}
+
 /// What the dashboard does once an item was opened (or not).
 enum AfterOpen {
     /// Close the dashboard.
@@ -160,11 +192,10 @@ enum AfterOpen {
     Back(Option<String>),
 }
 
-/// Open `item` outside the TUI so worktrunk's hooks and prompts are visible.
-/// With `choose_base`, a new issue branch starts from a branch the user picks.
-/// When the focus moves to the item, the dashboard closes; otherwise it stays
-/// so more items can be opened.
-fn open(opener: &Opener, item: &Item, choose_base: bool) -> AfterOpen {
+/// Open `item` outside the TUI so worktrunk's hooks and prompts are visible,
+/// after asking the user what `ask` says. When the focus moves to the item,
+/// the dashboard closes; otherwise it stays so more items can be opened.
+fn open(opener: &Opener, item: &Item, ask: Ask) -> AfterOpen {
     print!("\x1b[2J\x1b[H");
     println!(
         "\x1b[1mOpening {} {}\x1b[0m: {}\n",
@@ -176,12 +207,14 @@ fn open(opener: &Opener, item: &Item, choose_base: bool) -> AfterOpen {
         println!("\x1b[36m›\x1b[0m {line}");
         let _ = std::io::stdout().flush();
     };
-    let mut pick = |candidates: &[BaseCandidate]| pick_base(item, candidates);
-    let result = if choose_base {
-        opener.open_with(item, Some(&mut pick), &mut log)
-    } else {
-        opener.open(item, &mut log)
+    let mut base = |candidates: &[BaseCandidate]| pick_base(item, candidates);
+    let mut branch = |candidates: &[BranchCandidate]| pick_branch(item, candidates);
+    let how = match ask {
+        Ask::Nothing => IssueBranch::Default,
+        Ask::Base => IssueBranch::FromBase(&mut base),
+        Ask::Branch => IssueBranch::Link(&mut branch),
     };
+    let result = opener.open_with(item, how, &mut log);
     let name = format!("{} {}", item.repo, item.reference());
     match result {
         Ok(Outcome::AlreadyOpen { .. } | Outcome::Opened { .. }) if opener.focus => AfterOpen::Exit,
@@ -206,28 +239,52 @@ fn open(opener: &Opener, item: &Item, choose_base: bool) -> AfterOpen {
     }
 }
 
-/// Let the user pick the base branch in a full-screen picker; `None` cancels.
-fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>> {
-    let mut picker = Picker::new(candidates.to_vec()).accepting_typed();
+/// Run `picker` full screen until the user picks an entry, which `value`
+/// turns into the answer, or typed text, or cancels (`None`).
+fn run_picker<T: Entry + Clone>(
+    mut picker: Picker<T>,
+    render: impl Fn(&mut Frame, &Picker<T>),
+    value: impl Fn(T) -> String,
+) -> Result<Option<String>> {
     let mut terminal = ratatui::init();
     let result = (|| loop {
-        terminal.draw(|frame| ui::render_base_picker(frame, &picker, item))?;
+        terminal.draw(|frame| render(frame, &picker))?;
         if let Event::Key(key) = event::read()?
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key) {
-                PickerAction::Pick(base) => return Ok(Some(base.name)),
-                PickerAction::Typed(base) => return Ok(Some(base)),
+                PickerAction::Pick(entry) => return Ok(Some(value(entry))),
+                PickerAction::Typed(text) => return Ok(Some(text)),
                 PickerAction::Cancel => return Ok(None),
                 PickerAction::None => {}
             }
         }
     })();
     ratatui::restore();
+    result
+}
+
+/// Let the user pick the base branch of a new issue branch; `None` cancels.
+fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>> {
+    let picker = Picker::new(candidates.to_vec()).accepting_typed();
+    let result = run_picker(
+        picker,
+        |frame, picker| ui::render_base_picker(frame, picker, item),
+        |candidate| candidate.name,
+    );
     if let Ok(Some(base)) = &result {
         println!("\x1b[36m›\x1b[0m Base branch: {base}");
     }
     result
+}
+
+/// Let the user pick the branch to link an issue to; `None` cancels.
+fn pick_branch(item: &Item, candidates: &[BranchCandidate]) -> Result<Option<String>> {
+    run_picker(
+        Picker::new(candidates.to_vec()),
+        |frame, picker| ui::render_branch_picker(frame, picker, item),
+        |candidate| candidate.name,
+    )
 }
 
 /// Print `prompt` and wait for a line of input; returns what was typed.
