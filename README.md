@@ -318,6 +318,9 @@ Source layout:
 - `src/picker.rs`: state of the pickers for base branches and branches to link
 - `src/ui.rs`: rendering, with ratatui
 - `src/open.rs`: the open workflow (ghq, worktrunk, Herdr)
+- `src/open/branches.rs`: issue links in git config, and the branches offered
+  as a base, to link, or as an issue's own
+- `src/open/world.rs`: a simulated machine for the open workflow's tests
 - `src/pi.rs`: prompts and pi calls
 - `src/naming.rs`: cleans pi's answers into branch names and labels
 - `src/config.rs`: `config.toml` and environment overrides
