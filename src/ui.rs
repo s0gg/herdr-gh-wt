@@ -12,8 +12,8 @@ use ratatui::widgets::{
 };
 
 use crate::app::{App, Load, Mode, Section, age, age_of, requested_via};
-use crate::base_picker::BasePicker;
 use crate::github::{Item, Kind};
+use crate::picker::{BaseCandidate, Picker};
 
 const ACCENT: Color = Color::Cyan;
 
@@ -23,7 +23,7 @@ fn cells(n: usize) -> u16 {
 }
 
 /// The full-screen picker for the base branch of a new issue branch.
-pub fn render_base_picker(frame: &mut Frame, picker: &BasePicker, item: &Item) {
+pub fn render_base_picker(frame: &mut Frame, picker: &Picker<BaseCandidate>, item: &Item) {
     let [header, prompt, list, footer] = Layout::vertical([
         Constraint::Length(2),
         Constraint::Length(1),
@@ -629,7 +629,7 @@ mod tests {
         assert!(screen.contains("could not open the browser"), "{screen}");
     }
 
-    fn draw_picker(picker: &BasePicker, width: u16, height: u16) -> String {
+    fn draw_picker(picker: &Picker<BaseCandidate>, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         let item = sample().assigned_issues[0].clone();
         terminal
@@ -648,7 +648,7 @@ mod tests {
 
     #[test]
     fn base_picker_lists_branches_with_their_kind() {
-        let picker = BasePicker::new(crate::base_picker::tests::candidates());
+        let picker = Picker::new(crate::picker::tests::candidates()).accepting_typed();
         let screen = draw_picker(&picker, 100, 20);
         assert!(screen.contains("Issue #10"), "{screen}");
         assert!(screen.contains("Parser crashes"), "{screen}");
@@ -661,7 +661,7 @@ mod tests {
 
     #[test]
     fn base_picker_shows_the_query_and_the_typed_fallback() {
-        let mut picker = BasePicker::new(crate::base_picker::tests::candidates());
+        let mut picker = Picker::new(crate::picker::tests::candidates()).accepting_typed();
         for c in "pr:123".chars() {
             picker.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
         }

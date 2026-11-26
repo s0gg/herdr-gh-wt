@@ -16,12 +16,12 @@ use std::sync::{Arc, mpsc};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
-use crate::base_picker::BaseCandidate;
 use crate::config::PiConfig;
 use crate::github::{Item, Kind};
 use crate::herdr::{Herdr, WorktreeList};
 use crate::naming::unique_branch;
 use crate::pi;
+use crate::picker::BaseCandidate;
 use crate::runner::{Cmd, Io, Runner};
 
 /// Git config variable (`branch.<name>.herdr-gh-wt-issue`) that records which
@@ -442,8 +442,8 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base_picker::BaseCandidate;
     use crate::config::Config;
+    use crate::picker::BaseCandidate;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
     use std::sync::Mutex;

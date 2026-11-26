@@ -1,7 +1,17 @@
-//! Choosing the base (parent) branch for a new issue branch.
+//! A filterable list to pick from: the base branch of a new issue branch, or
+//! an existing branch to link to an issue.
+
+use std::path::PathBuf;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+/// Something a [`Picker`] lists.
+pub trait Entry {
+    /// The text the query is matched against.
+    fn text(&self) -> &str;
+}
+
+/// A branch a new issue branch can start from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BaseCandidate {
     /// What is passed to `wt switch --base`: `main`, `origin/epic/x`, ...
@@ -10,41 +20,83 @@ pub struct BaseCandidate {
     pub is_default: bool,
 }
 
+impl Entry for BaseCandidate {
+    fn text(&self) -> &str {
+        &self.name
+    }
+}
+
+/// A local branch that can be linked to an issue.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum PickerAction {
+pub struct BranchCandidate {
+    pub name: String,
+    /// The branch's worktree, when it has one.
+    pub worktree: Option<PathBuf>,
+    /// Whether that worktree is open in Herdr.
+    pub open: bool,
+    /// The issue the branch is linked to, if any.
+    pub issue: Option<u64>,
+}
+
+impl Entry for BranchCandidate {
+    fn text(&self) -> &str {
+        &self.name
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PickerAction<T> {
     None,
-    Pick(String),
+    Pick(T),
+    /// Text the user typed, for a picker that accepts it.
+    Typed(String),
     Cancel,
 }
 
 #[derive(Debug, Clone)]
-pub struct BasePicker {
-    pub candidates: Vec<BaseCandidate>,
+pub struct Picker<T> {
+    pub entries: Vec<T>,
     pub query: String,
     cursor: usize,
+    /// Whether enter can pick the typed text instead of an entry.
+    accepts_typed: bool,
 }
 
-impl BasePicker {
-    pub fn new(candidates: Vec<BaseCandidate>) -> Self {
-        BasePicker {
-            candidates,
+impl<T: Entry + Clone> Picker<T> {
+    pub fn new(entries: Vec<T>) -> Self {
+        Picker {
+            entries,
             query: String::new(),
             cursor: 0,
+            accepts_typed: false,
         }
     }
 
-    /// Candidates matching every whitespace-separated term of the query.
-    pub fn filtered(&self) -> Vec<&BaseCandidate> {
+    /// Let enter pick the typed text when nothing matches it, and alt-enter
+    /// pick it even when something does.
+    pub fn accepting_typed(self) -> Self {
+        Picker {
+            accepts_typed: true,
+            ..self
+        }
+    }
+
+    pub fn accepts_typed(&self) -> bool {
+        self.accepts_typed
+    }
+
+    /// Entries matching every whitespace-separated term of the query.
+    pub fn filtered(&self) -> Vec<&T> {
         let terms: Vec<String> = self
             .query
             .split_whitespace()
             .map(str::to_lowercase)
             .collect();
-        self.candidates
+        self.entries
             .iter()
-            .filter(|c| {
-                let name = c.name.to_lowercase();
-                terms.iter().all(|term| name.contains(term))
+            .filter(|e| {
+                let text = e.text().to_lowercase();
+                terms.iter().all(|term| text.contains(term))
             })
             .collect()
     }
@@ -54,7 +106,7 @@ impl BasePicker {
         self.cursor.min(self.filtered().len().saturating_sub(1))
     }
 
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction {
+    pub fn handle_key(&mut self, key: KeyEvent) -> PickerAction<T> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         match key.code {
             KeyCode::Esc => return PickerAction::Cancel,
@@ -74,14 +126,15 @@ impl BasePicker {
         PickerAction::None
     }
 
-    /// The highlighted candidate, or the typed text when nothing matches or
-    /// when `force_typed` is set.
-    fn pick(&self, force_typed: bool) -> PickerAction {
+    /// The highlighted entry; or the typed text, when the picker accepts it
+    /// and nothing matches or `force_typed` is set.
+    fn pick(&self, force_typed: bool) -> PickerAction<T> {
         let typed = self.query.trim();
-        let highlighted = self.filtered().get(self.cursor()).map(|c| c.name.clone());
+        let highlighted = self.filtered().get(self.cursor()).map(|&e| e.clone());
+        let force_typed = force_typed && self.accepts_typed;
         match highlighted {
-            Some(name) if !force_typed => PickerAction::Pick(name),
-            _ if !typed.is_empty() => PickerAction::Pick(typed.to_string()),
+            Some(entry) if !force_typed => PickerAction::Pick(entry),
+            _ if self.accepts_typed && !typed.is_empty() => PickerAction::Typed(typed.to_string()),
             _ => PickerAction::None,
         }
     }
@@ -115,33 +168,76 @@ pub(crate) mod tests {
         ]
     }
 
+    pub fn branches() -> Vec<BranchCandidate> {
+        vec![
+            BranchCandidate {
+                name: "login-timeout".into(),
+                worktree: Some("/src/acme/app.login-timeout".into()),
+                open: true,
+                issue: None,
+            },
+            BranchCandidate {
+                name: "search-accents".into(),
+                worktree: Some("/src/acme/app.search-accents".into()),
+                open: false,
+                issue: Some(3),
+            },
+            BranchCandidate {
+                name: "main".into(),
+                worktree: Some("/src/acme/app".into()),
+                open: true,
+                issue: None,
+            },
+            BranchCandidate {
+                name: "old-experiment".into(),
+                worktree: None,
+                open: false,
+                issue: None,
+            },
+        ]
+    }
+
+    fn base_picker() -> Picker<BaseCandidate> {
+        Picker::new(candidates()).accepting_typed()
+    }
+
     fn key(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
     }
 
-    fn type_text(picker: &mut BasePicker, text: &str) {
+    fn type_text<T: Entry + Clone + std::fmt::Debug + PartialEq>(
+        picker: &mut Picker<T>,
+        text: &str,
+    ) {
         for c in text.chars() {
             assert_eq!(picker.handle_key(key(KeyCode::Char(c))), PickerAction::None);
         }
     }
 
-    fn names(picker: &BasePicker) -> Vec<&str> {
-        picker.filtered().iter().map(|c| c.name.as_str()).collect()
+    fn names<T: Entry + Clone>(picker: &Picker<T>) -> Vec<&str> {
+        picker.filtered().iter().map(|e| e.text()).collect()
+    }
+
+    fn picked_name<T: Entry>(action: PickerAction<T>) -> Option<String> {
+        match action {
+            PickerAction::Pick(entry) => Some(entry.text().to_string()),
+            _ => None,
+        }
     }
 
     #[test]
-    fn enter_picks_the_default_branch_first() {
-        let mut picker = BasePicker::new(candidates());
+    fn enter_picks_the_first_entry() {
+        let mut picker = base_picker();
         assert_eq!(picker.cursor(), 0);
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Pick("main".into())
+            PickerAction::Pick(candidates()[0].clone())
         );
     }
 
     #[test]
     fn typing_filters_and_letters_are_not_navigation() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         type_text(&mut picker, "EPIC jk");
         assert!(names(&picker).is_empty(), "j and k are part of the query");
         picker.handle_key(key(KeyCode::Backspace));
@@ -153,14 +249,14 @@ pub(crate) mod tests {
 
     #[test]
     fn arrows_move_within_the_filtered_list() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         type_text(&mut picker, "epic");
         picker.handle_key(key(KeyCode::Down));
         picker.handle_key(key(KeyCode::Down));
         assert_eq!(picker.cursor(), 1, "stops at the end");
         assert_eq!(
-            picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Pick("origin/epic/search-v2".into())
+            picked_name(picker.handle_key(key(KeyCode::Enter))).as_deref(),
+            Some("origin/epic/search-v2")
         );
         picker.handle_key(key(KeyCode::Up));
         picker.handle_key(key(KeyCode::Up));
@@ -173,42 +269,42 @@ pub(crate) mod tests {
 
     #[test]
     fn the_cursor_is_clamped_when_the_query_narrows_the_list() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         for _ in 0..3 {
             picker.handle_key(key(KeyCode::Down));
         }
         type_text(&mut picker, "login");
         assert_eq!(picker.cursor(), 0);
         assert_eq!(
-            picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Pick("feature/login".into())
+            picked_name(picker.handle_key(key(KeyCode::Enter))).as_deref(),
+            Some("feature/login")
         );
     }
 
     #[test]
     fn enter_without_matches_uses_the_typed_text() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         type_text(&mut picker, " pr:123 ");
         assert_eq!(names(&picker), Vec::<&str>::new());
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
-            PickerAction::Pick("pr:123".into())
+            PickerAction::Typed("pr:123".into())
         );
     }
 
     #[test]
     fn alt_enter_forces_the_typed_text() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         type_text(&mut picker, "epic");
         assert_eq!(
             picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
-            PickerAction::Pick("epic".into())
+            PickerAction::Typed("epic".into())
         );
     }
 
     #[test]
     fn enter_with_nothing_to_pick_does_nothing() {
-        let mut picker = BasePicker::new(vec![]);
+        let mut picker = Picker::<BaseCandidate>::new(vec![]).accepting_typed();
         assert_eq!(picker.handle_key(key(KeyCode::Enter)), PickerAction::None);
         assert_eq!(
             picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
@@ -218,7 +314,7 @@ pub(crate) mod tests {
 
     #[test]
     fn ctrl_u_clears_and_esc_or_ctrl_c_cancel() {
-        let mut picker = BasePicker::new(candidates());
+        let mut picker = base_picker();
         type_text(&mut picker, "abc");
         picker.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         assert_eq!(picker.query, "");
@@ -226,6 +322,25 @@ pub(crate) mod tests {
         assert_eq!(
             picker.handle_key(KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             PickerAction::Cancel
+        );
+    }
+
+    #[test]
+    fn a_picker_without_typed_text_only_picks_entries() {
+        let mut picker = Picker::new(branches());
+        assert!(!picker.accepts_typed());
+        type_text(&mut picker, "search");
+        assert_eq!(
+            picker.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT)),
+            PickerAction::Pick(branches()[1].clone()),
+            "alt-enter picks the highlighted entry"
+        );
+        type_text(&mut picker, "-nothing");
+        assert_eq!(names(&picker), Vec::<&str>::new());
+        assert_eq!(
+            picker.handle_key(key(KeyCode::Enter)),
+            PickerAction::None,
+            "the typed text is never picked"
         );
     }
 }
@@ -250,13 +365,22 @@ mod properties {
         #[test]
         fn keys_keep_the_cursor_in_bounds_and_picks_are_usable(
             candidates in prop::collection::vec(candidate(), 0..8),
+            accepts_typed in any::<bool>(),
             keys in prop::collection::vec(key_event(), 0..40),
         ) {
-            let mut picker = BasePicker::new(candidates.clone());
+            let mut picker = Picker::new(candidates.clone());
+            if accepts_typed {
+                picker = picker.accepting_typed();
+            }
             for key in keys {
-                if let PickerAction::Pick(base) = picker.handle_key(key) {
-                    prop_assert!(!base.is_empty());
-                    prop_assert_eq!(base.trim(), base.as_str());
+                match picker.handle_key(key) {
+                    PickerAction::Pick(entry) => prop_assert!(candidates.contains(&entry)),
+                    PickerAction::Typed(text) => {
+                        prop_assert!(accepts_typed);
+                        prop_assert!(!text.is_empty());
+                        prop_assert_eq!(text.trim(), text.as_str());
+                    }
+                    PickerAction::None | PickerAction::Cancel => {}
                 }
                 let len = picker.filtered().len();
                 let in_bounds = if len == 0 { picker.cursor() == 0 } else { picker.cursor() < len };

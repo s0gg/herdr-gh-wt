@@ -8,11 +8,11 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use herdr_gh_wt::app::{Action, App, Load};
-use herdr_gh_wt::base_picker::{BaseCandidate, BasePicker, PickerAction};
 use herdr_gh_wt::config::Config;
 use herdr_gh_wt::github::{self, Dashboard, Item};
 use herdr_gh_wt::herdr::{Herdr, PaneOpen};
 use herdr_gh_wt::open::{Opener, Outcome};
+use herdr_gh_wt::picker::{BaseCandidate, Picker, PickerAction};
 use herdr_gh_wt::runner::{Runner, SystemRunner};
 use herdr_gh_wt::ui;
 
@@ -208,7 +208,7 @@ fn open(opener: &Opener, item: &Item, choose_base: bool) -> AfterOpen {
 
 /// Let the user pick the base branch in a full-screen picker; `None` cancels.
 fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>> {
-    let mut picker = BasePicker::new(candidates.to_vec());
+    let mut picker = Picker::new(candidates.to_vec()).accepting_typed();
     let mut terminal = ratatui::init();
     let result = (|| loop {
         terminal.draw(|frame| ui::render_base_picker(frame, &picker, item))?;
@@ -216,7 +216,8 @@ fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key) {
-                PickerAction::Pick(base) => return Ok(Some(base)),
+                PickerAction::Pick(base) => return Ok(Some(base.name)),
+                PickerAction::Typed(base) => return Ok(Some(base)),
                 PickerAction::Cancel => return Ok(None),
                 PickerAction::None => {}
             }
