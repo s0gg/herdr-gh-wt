@@ -1,8 +1,8 @@
 id = "gh-wt"
 name = "GitHub worktrees"
 version = "0.1.0"
-# Popup panes need Herdr 0.7.4.
-min_herdr_version = "0.7.4"
+# The oldest Herdr the plugin has been tested with.
+min_herdr_version = "0.9.1"
 description = "Dashboard of pull requests awaiting your review and issues assigned to you; open any of them as a worktrunk worktree workspace"
 platforms = ["linux", "macos"]
 

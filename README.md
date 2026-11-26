@@ -65,13 +65,16 @@ dashboard.
 
 ## Requirements
 
-- [Herdr](https://herdr.dev) ≥ 0.7.4
+- [Herdr](https://herdr.dev) ≥ 0.9.1
 - [gh](https://cli.github.com), authenticated (`gh auth login`)
-- [worktrunk](https://github.com/max-sixty/worktrunk) (`wt`) ≥ 0.60
+- [worktrunk](https://github.com/max-sixty/worktrunk) (`wt`) ≥ 0.61
 - [pi](https://github.com/earendil-works/pi), with a model you can use
 - [ghq](https://github.com/x-motemen/ghq)
 - git
 - A Rust toolchain (`cargo`) 1.88 or later to build the plugin
+
+The Herdr and worktrunk versions are the oldest the plugin has been tested
+with. Older versions may work, but haven't been tried.
 
 Platforms: Linux and macOS.
 
