@@ -148,10 +148,7 @@ pub(crate) mod tests {
         picker.handle_key(key(KeyCode::Backspace));
         picker.handle_key(key(KeyCode::Backspace));
         assert_eq!(picker.query, "EPIC");
-        assert_eq!(
-            names(&picker),
-            ["epic/search", "origin/epic/search-v2"]
-        );
+        assert_eq!(names(&picker), ["epic/search", "origin/epic/search-v2"]);
     }
 
     #[test]
