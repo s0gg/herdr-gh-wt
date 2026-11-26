@@ -206,18 +206,23 @@ files, so a small, fast model is enough.
 ## Development
 
 ```bash
-cargo test
+cargo test                   # unit and property-based (proptest) tests
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo deny check             # licenses, advisories, bans and sources (cargo-deny)
+shellcheck scripts/*.sh
 scripts/check-versions.sh    # Cargo.toml and herdr-plugin.toml versions match
 ```
 
+The lints are configured in `Cargo.toml` (`[lints]`): clippy's pedantic group
+is on, and unsafe code is forbidden.
+
 CI (`.github/workflows/ci.yml`) runs these checks on every push to `main`
-and on every pull request. It runs the tests on Linux and macOS, and checks
-that the crate builds with the minimum supported Rust version (`rust-version`
-in `Cargo.toml`). When you bump the version, change it in both `Cargo.toml`
-and `herdr-plugin.toml`.
+and on every pull request. It also runs the tests on macOS, checks that the
+crate builds with the minimum supported Rust version (`rust-version` in
+`Cargo.toml`), and audits the workflow itself with
+[zizmor](https://github.com/zizmorcore/zizmor). When you bump the version,
+change it in both `Cargo.toml` and `herdr-plugin.toml`.
 
 ### End-to-end sandbox
 
