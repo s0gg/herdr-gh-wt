@@ -39,18 +39,15 @@ pub fn render_prompt(template: &str, item: &Item) -> String {
     while let Some(start) = rest.find('{') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        match after
+        if let Some((end, v)) = after
             .find('}')
             .and_then(|end| value(&after[..end]).map(|v| (end, v)))
         {
-            Some((end, v)) => {
-                out.push_str(&v);
-                rest = &after[end + 1..];
-            }
-            None => {
-                out.push('{');
-                rest = after;
-            }
+            out.push_str(&v);
+            rest = &after[end + 1..];
+        } else {
+            out.push('{');
+            rest = after;
         }
     }
     out.push_str(rest);

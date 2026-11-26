@@ -17,6 +17,11 @@ use crate::github::{Item, Kind};
 
 const ACCENT: Color = Color::Cyan;
 
+/// A count as terminal cells, saturating at the largest size a terminal has.
+fn cells(n: usize) -> u16 {
+    u16::try_from(n).unwrap_or(u16::MAX)
+}
+
 /// The full-screen picker for the base branch of a new issue branch.
 pub fn render_base_picker(frame: &mut Frame, picker: &BasePicker, item: &Item) {
     let [header, prompt, list, footer] = Layout::vertical([
@@ -151,7 +156,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, now: SystemTime) {
     match &app.load {
         Load::Loading => status.push(Span::from("refreshing...").fg(ACCENT)),
         Load::Failed(message) => {
-            status.push(Span::from(format!("refresh failed: {message}")).red())
+            status.push(Span::from(format!("refresh failed: {message}")).red());
         }
         Load::Loaded => {
             if let Some(at) = app.fetched_at {
@@ -220,7 +225,7 @@ fn hints(pairs: &[(&str, &str)]) -> Line<'static> {
 }
 
 fn render_centered(frame: &mut Frame, area: Rect, text: Text) {
-    let height = (text.lines.len() as u16).min(area.height);
+    let height = cells(text.lines.len()).min(area.height);
     let [_, middle, _] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(height),
@@ -267,7 +272,7 @@ fn render_body(frame: &mut Frame, area: Rect, app: &App, now: SystemTime) {
 /// Share `height` between the two lists: each gets what it needs (rows plus
 /// borders and header) when possible, otherwise at least half.
 fn split_heights(height: u16, reviews: usize, issues: usize) -> (u16, u16) {
-    let need = |rows: usize| (rows.max(1) as u16).saturating_add(3);
+    let need = |rows: usize| cells(rows.max(1)).saturating_add(3);
     let (need_reviews, need_issues) = (need(reviews), need(issues));
     let reviews_height = if need_reviews + need_issues <= height {
         need_reviews
@@ -304,12 +309,14 @@ fn render_section(
         return;
     }
 
-    let repo_width = items
-        .iter()
-        .map(|i| i.repo.chars().count())
-        .max()
-        .unwrap_or(0)
-        .min(28) as u16;
+    let repo_width = cells(
+        items
+            .iter()
+            .map(|i| i.repo.chars().count())
+            .max()
+            .unwrap_or(0)
+            .min(28),
+    );
     let (header, widths, rows): (Vec<&str>, Vec<Constraint>, Vec<Row>) = match section {
         Section::Reviews => (
             vec![
@@ -470,15 +477,17 @@ fn render_repo_picker(frame: &mut Frame, area: Rect, app: &App, cursor: usize) {
             .map(|(repo, n)| ListItem::new(format!("{repo} ({n})"))),
     );
 
-    let rows = entries.len() as u16;
-    let longest = repos
-        .iter()
-        .map(|(r, _)| r.chars().count() + 8)
-        .max()
-        .unwrap_or(0)
-        .max(28) as u16;
-    let popup_width = (longest + 6).min(area.width);
-    let popup_height = (rows + 2).min(area.height);
+    let rows = cells(entries.len());
+    let longest = cells(
+        repos
+            .iter()
+            .map(|(r, _)| r.chars().count() + 8)
+            .max()
+            .unwrap_or(0)
+            .max(28),
+    );
+    let popup_width = longest.saturating_add(6).min(area.width);
+    let popup_height = rows.saturating_add(2).min(area.height);
     let [_, row, _] = Layout::vertical([
         Constraint::Fill(1),
         Constraint::Length(popup_height),
@@ -580,7 +589,7 @@ mod tests {
     #[test]
     fn shows_empty_sections() {
         let mut app = App::new();
-        app.set_dashboard(Default::default(), SystemTime::UNIX_EPOCH);
+        app.set_dashboard(crate::github::Dashboard::default(), SystemTime::UNIX_EPOCH);
         let screen = draw(&app, 80, 20);
         assert!(screen.contains("Review requests (0)"), "{screen}");
         assert!(screen.contains("Nothing here"), "{screen}");

@@ -52,10 +52,14 @@ pub fn unique_branch(slug: &str, exists: impl Fn(&str) -> bool) -> String {
     if !exists(slug) {
         return slug.to_string();
     }
-    (2..)
-        .map(|n| format!("{slug}-{n}"))
-        .find(|candidate| !exists(candidate))
-        .expect("an unused branch name always exists")
+    let mut n = 2;
+    loop {
+        let candidate = format!("{slug}-{n}");
+        if !exists(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
 }
 
 /// The first line that still has content once surrounding whitespace and

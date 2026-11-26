@@ -95,7 +95,7 @@ fn dashboard() -> Result<()> {
     let mut terminal = ratatui::init();
     let result = loop {
         match step(&mut terminal, &mut app, &rx) {
-            Ok(None) => {}
+            Ok(None | Some(Action::None)) => {}
             Ok(Some(Action::Quit)) => break Ok(()),
             Ok(Some(Action::Refresh)) => {
                 app.load = Load::Loading;
@@ -115,7 +115,6 @@ fn dashboard() -> Result<()> {
                 }
                 terminal = ratatui::init();
             }
-            Ok(Some(Action::None)) => {}
             Err(err) => break Err(err),
         }
     };

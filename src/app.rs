@@ -301,10 +301,10 @@ impl App {
                 self.query.pop();
             }
             KeyCode::Char('u') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.query.clear()
+                self.query.clear();
             }
             KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.query.push(c)
+                self.query.push(c);
             }
             _ => return,
         }
@@ -331,7 +331,7 @@ impl App {
                 self.mode = Mode::Normal;
                 self.filters_changed();
             }
-            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('r') => self.mode = Mode::Normal,
+            KeyCode::Esc | KeyCode::Char('q' | 'r') => self.mode = Mode::Normal,
             _ => {}
         }
     }
@@ -364,16 +364,16 @@ pub fn age(timestamp: &str, now: SystemTime) -> String {
 
 /// Compact time from `then` to `now`; `now` when `then` is in the future.
 pub fn age_of(then: SystemTime, now: SystemTime) -> String {
-    let secs = now.duration_since(then).map(|d| d.as_secs()).unwrap_or(0);
+    let secs = now.duration_since(then).map_or(0, |d| d.as_secs());
     let (minutes, hours, days) = (secs / 60, secs / 3600, secs / 86_400);
     match () {
-        _ if secs < 60 => "now".to_string(),
-        _ if hours < 1 => format!("{minutes}m"),
-        _ if days < 1 => format!("{hours}h"),
-        _ if days < 7 => format!("{days}d"),
-        _ if days < 30 => format!("{}w", days / 7),
-        _ if days < 365 => format!("{}mo", days / 30),
-        _ => format!("{}y", days / 365),
+        () if secs < 60 => "now".to_string(),
+        () if hours < 1 => format!("{minutes}m"),
+        () if days < 1 => format!("{hours}h"),
+        () if days < 7 => format!("{days}d"),
+        () if days < 30 => format!("{}w", days / 7),
+        () if days < 365 => format!("{}mo", days / 30),
+        () => format!("{}y", days / 365),
     }
 }
 
@@ -600,7 +600,7 @@ pub(crate) mod tests {
         app.dashboard
             .review_requests
             .retain(|i| i.repo != "acme/lib");
-        assert!(app.visible(Section::Reviews).is_empty());
+        assert_eq!(app.visible(Section::Reviews), Vec::<&Item>::new());
         press(&mut app, &[KeyCode::Char('j')]);
         assert_eq!(app.section, Section::Issues);
         assert_eq!(app.selected_item().unwrap().number, 10);
@@ -734,7 +734,7 @@ pub(crate) mod tests {
         let mut app = loaded();
         app.query = "#10".into();
         assert_eq!(numbers(&app, Section::Issues), vec![10]);
-        assert!(numbers(&app, Section::Reviews).is_empty());
+        assert_eq!(numbers(&app, Section::Reviews), Vec::<u64>::new());
         app.query = "alice bug".into();
         assert_eq!(numbers(&app, Section::Reviews), vec![1, 2, 3]);
     }

@@ -69,13 +69,12 @@ impl Opener {
         let repo_path = self.locate_repository(item, log)?;
         let list = self.herdr.worktree_list(runner, &repo_path)?;
         let root = list.source.repo_root.clone();
-        let root_workspace = match list.source.source_workspace_id.clone() {
-            Some(id) => id,
-            None => {
-                let label = repository_label(&list);
-                log(&format!("Creating Herdr workspace \"{label}\""));
-                self.herdr.workspace_create(runner, &root, &label)?
-            }
+        let root_workspace = if let Some(id) = list.source.source_workspace_id.clone() {
+            id
+        } else {
+            let label = repository_label(&list);
+            log(&format!("Creating Herdr workspace \"{label}\""));
+            self.herdr.workspace_create(runner, &root, &label)?
         };
 
         // The branch the item lives on, when it is known up front.
@@ -214,14 +213,10 @@ impl Opener {
             .map(PathBuf::from))
     }
 
-    fn git(&self, root: &Path, args: &[&str]) -> Cmd {
-        Cmd::new("git", args.iter().copied()).cwd(root)
-    }
-
     fn branch_exists(&self, root: &Path, branch: &str) -> bool {
         let reference = format!("refs/heads/{branch}");
         self.runner
-            .run(&self.git(root, &["show-ref", "--verify", "--quiet", &reference]))
+            .run(&git(root, &["show-ref", "--verify", "--quiet", &reference]))
             .is_ok_and(|out| out.success)
     }
 
@@ -230,7 +225,7 @@ impl Opener {
         let pattern = format!("^branch\\..*\\.{ISSUE_CONFIG_KEY}$");
         let out = self
             .runner
-            .run(&self.git(root, &["config", "--get-regexp", &pattern]))?;
+            .run(&git(root, &["config", "--get-regexp", &pattern]))?;
         if !out.success {
             // git exits with 1 when nothing matches.
             return Ok(None);
@@ -257,7 +252,7 @@ impl Opener {
         let key = format!("branch.{branch}.{ISSUE_CONFIG_KEY}");
         let recorded = self
             .runner
-            .stdout(&self.git(root, &["config", &key, &number.to_string()]));
+            .stdout(&git(root, &["config", &key, &number.to_string()]));
         if let Err(err) = recorded {
             log(&format!(
                 "Could not record the issue on branch {branch}: {err:#}"
@@ -273,11 +268,9 @@ impl Opener {
         log: &mut dyn FnMut(&str),
     ) -> Result<Option<String>> {
         log("Fetching remote branches...");
-        let fetched = self.runner.run(
-            &self
-                .git(root, &["fetch", "--all", "--quiet"])
-                .io(Io::Inherit),
-        );
+        let fetched = self
+            .runner
+            .run(&git(root, &["fetch", "--all", "--quiet"]).io(Io::Inherit));
         match fetched {
             Ok(out) if out.success => {}
             Ok(_) => log("git fetch failed; offering the branches known locally"),
@@ -293,7 +286,7 @@ impl Opener {
     /// counterpart, most recently committed first, with the default branch
     /// moved to the top.
     fn base_candidates(&self, root: &Path) -> Result<Vec<BaseCandidate>> {
-        let refs = self.runner.stdout(&self.git(
+        let refs = self.runner.stdout(&git(
             root,
             &[
                 "for-each-ref",
@@ -331,7 +324,7 @@ impl Opener {
             .chain(remote.iter().map(|name| candidate(name, true)))
             .collect();
 
-        let head = self.runner.run(&self.git(
+        let head = self.runner.run(&git(
             root,
             &[
                 "symbolic-ref",
@@ -395,6 +388,11 @@ impl Opener {
     }
 }
 
+/// `git ARGS...` run inside `root`.
+fn git(root: &Path, args: &[&str]) -> Cmd {
+    Cmd::new("git", args.iter().copied()).cwd(root)
+}
+
 #[derive(Debug, Deserialize)]
 struct Switched {
     #[serde(default)]
@@ -428,11 +426,10 @@ fn repository_label(list: &WorktreeList) -> String {
     if !name.is_empty() {
         return name.to_string();
     }
-    list.source
-        .repo_root
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_else(|| list.source.repo_root.display().to_string())
+    list.source.repo_root.file_name().map_or_else(
+        || list.source.repo_root.display().to_string(),
+        |n| n.to_string_lossy().into_owned(),
+    )
 }
 
 fn same_path(a: &Path, b: &Path) -> bool {
@@ -456,6 +453,7 @@ mod tests {
     /// A simulated machine: a ghq root, a Herdr session, a git repository and
     /// worktrunk, answering the commands the opener runs.
     #[derive(Clone)]
+    #[allow(clippy::struct_excessive_bools)] // independent switches of a test fixture
     struct World {
         cloned: bool,
         workspace: bool,
@@ -512,10 +510,10 @@ mod tests {
         }
     }
 
-    fn simulate(world: Arc<Mutex<World>>, cmd: &Cmd) -> anyhow::Result<Output> {
+    fn simulate(world: &Mutex<World>, cmd: &Cmd) -> Output {
         let mut w = world.lock().unwrap();
         let args: Vec<&str> = cmd.args.iter().map(String::as_str).collect();
-        let out = match (cmd.program.as_str(), args.as_slice()) {
+        match (cmd.program.as_str(), args.as_slice()) {
             ("ghq", ["list", "--full-path", "--exact", "github.com/acme/app"]) => {
                 Output::ok(if w.cloned {
                     format!("{ROOT}\n")
@@ -567,8 +565,7 @@ mod tests {
                 w.workspace = true;
                 Output::ok(r#"{"result":{"workspace":{"workspace_id":"w1"}}}"#)
             }
-            ("herdr", ["workspace", "focus", _]) => Output::ok("{}"),
-            ("herdr", ["worktree", "open", ..]) => Output::ok("{}"),
+            ("herdr", ["workspace", "focus", _] | ["worktree", "open", ..]) => Output::ok("{}"),
             ("git", ["config", "--get-regexp", _]) => {
                 if w.issue_map.is_empty() {
                     Output {
@@ -579,8 +576,9 @@ mod tests {
                     Output::ok(
                         w.issue_map
                             .iter()
-                            .map(|(b, n)| format!("branch.{b}.{ISSUE_CONFIG_KEY} {n}\n"))
-                            .collect::<String>(),
+                            .map(|(b, n)| format!("branch.{b}.{ISSUE_CONFIG_KEY} {n}"))
+                            .collect::<Vec<_>>()
+                            .join("\n"),
                     )
                 }
             }
@@ -610,7 +608,7 @@ mod tests {
                     "refs/heads",
                     "refs/remotes",
                 ],
-            ) => Output::ok(w.refs.iter().map(|r| format!("{r}\n")).collect::<String>()),
+            ) => Output::ok(w.refs.join("\n")),
             (
                 "git",
                 [
@@ -641,7 +639,7 @@ mod tests {
                 );
                 assert_eq!(&rest[rest.len() - 2..], ["--no-cd", "--format=json"]);
                 if w.wt_fails {
-                    return Ok(Output::failed("hook failed"));
+                    return Output::failed("hook failed");
                 }
                 let (branch, action) = match rest {
                     ["--create", b, ..] => (b.to_string(), "created"),
@@ -674,8 +672,7 @@ mod tests {
                 }
             }
             _ => panic!("unexpected command: {}", cmd.line()),
-        };
-        Ok(out)
+        }
     }
 
     fn pr() -> Item {
@@ -725,7 +722,7 @@ mod tests {
     fn run_full(world: World, item: &Item, choose_base: Option<ChooseBase>, focus: bool) -> Run {
         let world = Arc::new(Mutex::new(world));
         let shared = world.clone();
-        let runner = Arc::new(FakeRunner::new(move |cmd| simulate(shared.clone(), cmd)));
+        let runner = Arc::new(FakeRunner::new(move |cmd| Ok(simulate(&shared, cmd))));
         let opener = Opener {
             runner: runner.clone(),
             herdr: Herdr::new("herdr"),
@@ -778,7 +775,7 @@ mod tests {
     fn wt_runs_inside_the_repository() {
         let world = Arc::new(Mutex::new(World::default()));
         let shared = world.clone();
-        let runner = Arc::new(FakeRunner::new(move |cmd| simulate(shared.clone(), cmd)));
+        let runner = Arc::new(FakeRunner::new(move |cmd| Ok(simulate(&shared, cmd))));
         Opener {
             runner: runner.clone(),
             herdr: Herdr::new("herdr"),

@@ -189,7 +189,7 @@ pub(crate) mod tests {
     fn enter_without_matches_uses_the_typed_text() {
         let mut picker = BasePicker::new(candidates());
         type_text(&mut picker, " pr:123 ");
-        assert!(names(&picker).is_empty());
+        assert_eq!(names(&picker), Vec::<&str>::new());
         assert_eq!(
             picker.handle_key(key(KeyCode::Enter)),
             PickerAction::Pick("pr:123".into())

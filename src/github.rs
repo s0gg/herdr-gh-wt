@@ -387,7 +387,7 @@ mod tests {
         assert_eq!(issue.title, "ログイン画面の改善");
         assert_eq!(issue.labels, vec!["enhancement", "bug"]);
         assert_eq!(issue.head_ref, None);
-        assert!(issue.reviewers.is_empty());
+        assert_eq!(issue.reviewers, vec![]);
         assert_eq!(issue.reference(), "Issue #202");
     }
 
