@@ -377,7 +377,7 @@ pub fn age_of(then: SystemTime, now: SystemTime) -> String {
     }
 }
 
-/// Parse a UTC timestamp as GitHub returns it, `2026-11-26T02:43:56Z`
+/// Parse a UTC timestamp as GitHub returns it, `2024-05-01T12:34:56Z`
 /// (optionally with fractional seconds). Dates before 1970 are rejected.
 pub fn parse_timestamp(text: &str) -> Option<SystemTime> {
     let rest = text.strip_suffix('Z')?;
