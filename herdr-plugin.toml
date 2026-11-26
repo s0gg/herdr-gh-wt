@@ -1,5 +1,5 @@
 id = "gh-wt"
-name = "GitHub worktrees"
+name = "herdr-gh-wt"
 version = "0.1.0"
 # The oldest Herdr the plugin has been tested with.
 min_herdr_version = "0.9.1"
