@@ -2,6 +2,8 @@
 name = "herdr-gh-wt"
 version = "0.1.0"
 edition = "2024"
+# Checked by the msrv job in .github/workflows/ci.yml.
+rust-version = "1.88"
 description = "Herdr plugin: a dashboard of GitHub review requests and assigned issues that opens them as worktrunk worktrees"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/s0gg/herdr-gh-wt"

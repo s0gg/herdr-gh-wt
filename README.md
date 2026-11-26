@@ -64,7 +64,7 @@ dashboard.
 - [pi](https://github.com/earendil-works/pi), with a model you can use
 - [ghq](https://github.com/x-motemen/ghq)
 - git
-- A Rust toolchain (`cargo`) to build the plugin
+- A Rust toolchain (`cargo`) 1.88 or later to build the plugin
 
 Platforms: Linux and macOS.
 
@@ -207,8 +207,17 @@ files, so a small, fast model is enough.
 
 ```bash
 cargo test
-cargo clippy --all-targets
+cargo fmt --check
+cargo clippy --all-targets -- -D warnings
+cargo deny check             # licenses, advisories, bans and sources (cargo-deny)
+scripts/check-versions.sh    # Cargo.toml and herdr-plugin.toml versions match
 ```
+
+CI (`.github/workflows/ci.yml`) runs these checks on every push to `main`
+and on every pull request. It runs the tests on Linux and macOS, and checks
+that the crate builds with the minimum supported Rust version (`rust-version`
+in `Cargo.toml`). When you bump the version, change it in both `Cargo.toml`
+and `herdr-plugin.toml`.
 
 You can also run the dashboard outside a plugin pane with
 `cargo run -- dashboard`, from inside Herdr.

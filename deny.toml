@@ -1,0 +1,31 @@
+# cargo-deny configuration, checked in CI (.github/workflows/ci.yml).
+# https://embarkstudios.github.io/cargo-deny/
+
+[graph]
+all-features = true
+
+[advisories]
+# Vulnerabilities and unmaintained crates fail the advisories check. Yanked
+# crates fail too.
+yanked = "deny"
+
+[licenses]
+# Every license a dependency may be used under. A crate offered under several
+# licenses ("MIT OR Apache-2.0") passes when one of them is listed.
+allow = [
+    "Apache-2.0",
+    "MIT",
+    # unicode-ident: (MIT OR Apache-2.0) AND Unicode-3.0
+    "Unicode-3.0",
+    # foldhash
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
