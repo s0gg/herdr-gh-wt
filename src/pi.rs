@@ -297,3 +297,36 @@ mod tests {
         assert_eq!(fallback_label(&pr(), 12), "PR #7 Login…");
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn item_with(title: String, body: String, labels: Vec<String>) -> Item {
+        Item {
+            title,
+            labels,
+            body,
+            ..tests::issue()
+        }
+    }
+
+    proptest! {
+        #[test]
+        fn rendering_never_panics(template in any::<String>(), title in any::<String>(), body in any::<String>()) {
+            let _ = render_prompt(&template, &item_with(title, body, vec![]));
+        }
+
+        #[test]
+        fn text_without_placeholders_is_kept(template in "[^{]*") {
+            prop_assert_eq!(render_prompt(&template, &tests::issue()), template);
+        }
+
+        #[test]
+        fn item_text_is_inserted_verbatim(title in ".*\\{body\\}.*", labels in prop::collection::vec(".*", 0..3)) {
+            let item = item_with(title.clone(), "BODY".into(), labels);
+            prop_assert_eq!(render_prompt("{title}", &item), title);
+        }
+    }
+}

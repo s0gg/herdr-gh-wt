@@ -166,6 +166,9 @@ impl Config {
                 PLACEMENTS.join(", ")
             );
         }
+        if raw.pi.label_max_chars == Some(0) {
+            bail!("pi.label_max_chars must be at least 1");
+        }
         Ok(Config {
             pi: PiConfig {
                 model: non_empty(raw.pi.model, d.pi.model),
@@ -337,6 +340,13 @@ mod tests {
     fn invalid_placement_is_rejected() {
         let err = Config::from_toml_str("[dashboard]\nplacement = \"floating\"\n").unwrap_err();
         assert!(format!("{err:#}").contains("floating"), "{err:#}");
+    }
+
+    #[test]
+    fn labels_must_allow_at_least_one_character() {
+        let err = Config::from_toml_str("[pi]\nlabel_max_chars = 0\n").unwrap_err();
+        assert!(format!("{err:#}").contains("label_max_chars"), "{err:#}");
+        assert!(Config::from_toml_str("[pi]\nlabel_max_chars = 1\n").is_ok());
     }
 
     #[test]

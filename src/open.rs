@@ -1191,3 +1191,29 @@ mod tests {
         assert!(!ran(&r, "herdr worktree open"), "{:#?}", r.lines);
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn worktrunk_output_never_panics(stdout in any::<String>()) {
+            let _ = parse_switched(&stdout);
+        }
+
+        #[test]
+        fn worktrunk_json_is_found_among_other_lines(
+            noise in prop::collection::vec("[^{\n]*", 0..3),
+            branch in any::<String>(),
+            path in "/[^\0]*",
+        ) {
+            let json = serde_json::json!({"action": "created", "branch": branch, "path": path});
+            let stdout = format!("{}\n{json}\n", noise.join("\n"));
+            let switched = parse_switched(&stdout).unwrap();
+            prop_assert_eq!(switched.branch, branch);
+            prop_assert_eq!(switched.path, PathBuf::from(path));
+        }
+    }
+}

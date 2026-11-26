@@ -900,3 +900,123 @@ pub(crate) mod tests {
         assert_eq!(age("garbage", now), "");
     }
 }
+
+#[cfg(test)]
+pub(crate) mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    /// Any key press, with any modifier: letters, the dashboard's keys and
+    /// navigation keys.
+    pub fn key_event() -> impl Strategy<Value = KeyEvent> {
+        let code = prop_oneof![
+            prop::char::range('a', 'z').prop_map(KeyCode::Char),
+            prop::sample::select(vec!['/', 'R', 'G', ' ', '#', '1', '-']).prop_map(KeyCode::Char),
+            prop::sample::select(vec![
+                KeyCode::Up,
+                KeyCode::Down,
+                KeyCode::Tab,
+                KeyCode::BackTab,
+                KeyCode::Enter,
+                KeyCode::Esc,
+                KeyCode::Backspace,
+                KeyCode::Home,
+                KeyCode::End,
+                KeyCode::F(5),
+            ]),
+        ];
+        let modifiers = prop::sample::select(vec![
+            KeyModifiers::NONE,
+            KeyModifiers::CONTROL,
+            KeyModifiers::ALT,
+            KeyModifiers::SHIFT,
+        ]);
+        (code, modifiers).prop_map(|(code, modifiers)| KeyEvent::new(code, modifiers))
+    }
+
+    fn is_leap(year: u64) -> bool {
+        (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
+    }
+
+    fn month_lengths(year: u64) -> [u64; 12] {
+        [
+            31,
+            if is_leap(year) { 29 } else { 28 },
+            31,
+            30,
+            31,
+            30,
+            31,
+            31,
+            30,
+            31,
+            30,
+            31,
+        ]
+    }
+
+    /// Seconds since the epoch, counted day by day.
+    fn naive_seconds(year: u64, month: u64, day: u64, hms: (u64, u64, u64)) -> u64 {
+        let year_days: u64 = (1970..year)
+            .map(|y| if is_leap(y) { 366 } else { 365 })
+            .sum();
+        let month_days: u64 = month_lengths(year)[..usize::try_from(month - 1).unwrap()]
+            .iter()
+            .sum();
+        (year_days + month_days + day - 1) * 86_400 + hms.0 * 3600 + hms.1 * 60 + hms.2
+    }
+
+    proptest! {
+        #[test]
+        fn timestamps_never_panic(text in any::<String>()) {
+            let _ = parse_timestamp(&text);
+        }
+
+        #[test]
+        fn timestamp_like_text_never_panics(
+            text in "[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{0,12})?Z",
+        ) {
+            if let Some(time) = parse_timestamp(&text) {
+                prop_assert!(time >= SystemTime::UNIX_EPOCH);
+            }
+        }
+
+        #[test]
+        fn valid_timestamps_match_a_day_count(
+            year in 1970u64..2500,
+            month in 1u64..=12,
+            day_seed in 0u64..31,
+            hms in (0u64..24, 0u64..60, 0u64..60),
+        ) {
+            let day = 1 + day_seed % month_lengths(year)[usize::try_from(month - 1).unwrap()];
+            let text = format!("{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z", hms.0, hms.1, hms.2);
+            let expected = SystemTime::UNIX_EPOCH
+                + std::time::Duration::from_secs(naive_seconds(year, month, day, hms));
+            prop_assert_eq!(parse_timestamp(&text), Some(expected), "{}", text);
+        }
+
+        #[test]
+        fn keys_keep_the_cursor_in_bounds(
+            keys in prop::collection::vec(key_event(), 0..60),
+            empty in any::<bool>(),
+        ) {
+            let mut app = App::new();
+            let dashboard = if empty { Dashboard::default() } else { tests::sample() };
+            app.set_dashboard(dashboard, SystemTime::UNIX_EPOCH);
+            for key in keys {
+                let _ = app.handle_key(key);
+                for section in [Section::Reviews, Section::Issues] {
+                    let len = app.visible(section).len();
+                    prop_assert!(len == 0 || app.selected_index(section) < len);
+                }
+                prop_assert_eq!(app.selected_item().is_some(), !app.visible(app.section).is_empty());
+                if let Mode::RepoPicker { cursor } = app.mode {
+                    prop_assert!(cursor <= app.repos().len());
+                }
+                if let Some(repo) = &app.repo {
+                    prop_assert!(app.repos().iter().any(|(r, _)| r == repo));
+                }
+            }
+        }
+    }
+}

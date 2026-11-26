@@ -202,3 +202,68 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use proptest::prelude::*;
+
+    proptest! {
+        #[test]
+        fn slugs_are_clean_kebab_case(raw in any::<String>()) {
+            if let Some(slug) = sanitize_branch_slug(&raw) {
+                prop_assert!(!slug.is_empty() && slug.len() <= MAX_SLUG_LEN, "{slug:?}");
+                prop_assert!(
+                    slug.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-'),
+                    "{slug:?}"
+                );
+                prop_assert!(!slug.starts_with('-') && !slug.ends_with('-'), "{slug:?}");
+                prop_assert!(!slug.contains("--"), "{slug:?}");
+            }
+        }
+
+        #[test]
+        fn slugs_are_stable(raw in any::<String>()) {
+            if let Some(slug) = sanitize_branch_slug(&raw) {
+                prop_assert_eq!(sanitize_branch_slug(&slug), Some(slug));
+            }
+        }
+
+        #[test]
+        fn slugs_keep_ascii_words(words in prop::collection::vec("[a-z0-9]{1,8}", 1..5)) {
+            let raw = words.join(" ");
+            let expected = words.join("-");
+            prop_assume!(expected.len() <= MAX_SLUG_LEN);
+            prop_assert_eq!(sanitize_branch_slug(&raw), Some(expected));
+        }
+
+        #[test]
+        fn labels_are_single_trimmed_lines(raw in any::<String>(), max_chars in 1usize..80) {
+            if let Some(label) = sanitize_label(&raw, max_chars) {
+                prop_assert!(!label.is_empty(), "{label:?}");
+                prop_assert!(label.chars().count() <= max_chars, "{label:?} > {max_chars}");
+                prop_assert!(!label.contains(['\n', '\r']), "{label:?}");
+                prop_assert_eq!(label.trim(), label.as_str());
+                prop_assert!(!label.contains("  "), "{label:?}");
+            }
+        }
+
+        #[test]
+        fn unique_branches_are_unused(
+            slug in "[a-z]{1,10}",
+            taken in prop::collection::btree_set(0u32..20, 0..20),
+        ) {
+            // `taken` holds suffixes in use; 0 and 1 stand for the bare slug.
+            let used = |name: &str| {
+                name == slug && taken.contains(&0)
+                    || name
+                        .strip_prefix(&format!("{slug}-"))
+                        .and_then(|n| n.parse::<u32>().ok())
+                        .is_some_and(|n| taken.contains(&n))
+            };
+            let branch = unique_branch(&slug, used);
+            prop_assert!(!used(&branch), "{branch:?}");
+            prop_assert!(branch.starts_with(&slug), "{branch:?}");
+        }
+    }
+}

@@ -229,3 +229,39 @@ pub(crate) mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod properties {
+    use super::*;
+    use crate::app::properties::key_event;
+    use proptest::prelude::*;
+
+    fn candidate() -> impl Strategy<Value = BaseCandidate> {
+        ("[a-z][a-z/-]{0,11}", any::<bool>(), any::<bool>()).prop_map(
+            |(name, remote, is_default)| BaseCandidate {
+                name,
+                remote,
+                is_default,
+            },
+        )
+    }
+
+    proptest! {
+        #[test]
+        fn keys_keep_the_cursor_in_bounds_and_picks_are_usable(
+            candidates in prop::collection::vec(candidate(), 0..8),
+            keys in prop::collection::vec(key_event(), 0..40),
+        ) {
+            let mut picker = BasePicker::new(candidates.clone());
+            for key in keys {
+                if let PickerAction::Pick(base) = picker.handle_key(key) {
+                    prop_assert!(!base.is_empty());
+                    prop_assert_eq!(base.trim(), base.as_str());
+                }
+                let len = picker.filtered().len();
+                let in_bounds = if len == 0 { picker.cursor() == 0 } else { picker.cursor() < len };
+                prop_assert!(in_bounds, "cursor {} of {}", picker.cursor(), len);
+            }
+        }
+    }
+}
