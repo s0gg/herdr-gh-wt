@@ -219,6 +219,21 @@ that the crate builds with the minimum supported Rust version (`rust-version`
 in `Cargo.toml`). When you bump the version, change it in both `Cargo.toml`
 and `herdr-plugin.toml`.
 
+### End-to-end sandbox
+
+`scripts/e2e-sandbox.sh` runs the dashboard against a throwaway Herdr session
+with a stub `gh`, so you can try the whole flow without a GitHub account and
+without touching your own session:
+
+```bash
+scripts/e2e-sandbox.sh up      # prints how to read and drive the dashboard
+scripts/e2e-sandbox.sh down    # stops the session and deletes the sandbox
+```
+
+The sandbox serves three assigned issues of a local `acme/app` repository,
+whose origin has a remote-only `epic/demo` branch to pick as a base. Pull
+requests are not part of it, because `wt switch pr:N` needs the real GitHub.
+
 You can also run the dashboard outside a plugin pane with
 `cargo run -- dashboard`, from inside Herdr.
 
