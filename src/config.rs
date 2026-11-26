@@ -51,6 +51,13 @@ const PLACEMENTS: [&str; 5] = ["popup", "overlay", "zoomed", "tab", "split"];
 struct RawConfig {
     pi: RawPi,
     dashboard: RawDashboard,
+    open: RawOpen,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+struct RawOpen {
+    focus: Option<bool>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -88,6 +95,7 @@ fn non_empty(value: Option<String>, default: Option<String>) -> Option<String> {
 pub struct Config {
     pub pi: PiConfig,
     pub dashboard: DashboardConfig,
+    pub open: OpenConfig,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -105,6 +113,13 @@ pub struct PiConfig {
     pub label_prompt: String,
     pub branch_prompt: String,
     pub label_max_chars: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenConfig {
+    /// Move the focus to the opened workspace and close the dashboard. When
+    /// false, open in the background and stay in the dashboard.
+    pub focus: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -135,6 +150,7 @@ impl Default for Config {
                 height: Some("90%".to_string()),
                 limit: 100,
             },
+            open: OpenConfig { focus: true },
         }
     }
 }
@@ -166,6 +182,9 @@ impl Config {
                 width: non_empty(raw.dashboard.width, d.dashboard.width),
                 height: non_empty(raw.dashboard.height, d.dashboard.height),
                 limit: raw.dashboard.limit.unwrap_or(d.dashboard.limit),
+            },
+            open: OpenConfig {
+                focus: raw.open.focus.unwrap_or(d.open.focus),
             },
         })
     }
@@ -242,6 +261,21 @@ mod tests {
         assert_eq!(config.dashboard.width.as_deref(), Some("90%"));
         assert_eq!(config.dashboard.height.as_deref(), Some("90%"));
         assert_eq!(config.dashboard.limit, 100);
+    }
+
+    #[test]
+    fn opening_moves_the_focus_by_default() {
+        assert!(Config::default().open.focus);
+    }
+
+    #[test]
+    fn focus_can_be_turned_off() {
+        let config = Config::from_toml_str("[open]\nfocus = false\n").unwrap();
+        assert!(!config.open.focus);
+        assert!(
+            Config::from_toml_str("[open]\nfocuss = false\n").is_err(),
+            "typos are reported"
+        );
     }
 
     #[test]

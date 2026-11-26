@@ -23,8 +23,9 @@ workspace.
 2. **Make sure the repository has a Herdr workspace.** If none exists, the
    plugin creates one labelled with the repository name, so the worktree
    workspace has a parent to group under.
-3. **Focus the item if it is already open.** If the item's branch is already
-   open in Herdr, the plugin focuses that workspace and stops there.
+3. **Stop if the item is already open.** If the item's branch is already open
+   in Herdr, the plugin focuses that workspace (unless `focus = false`) and
+   stops there.
 4. **Switch to the worktree with worktrunk.** worktrunk's hooks run, and their
    output and any approval prompts show in the pane.
    - Pull requests: `wt switch pr:<number>`. worktrunk checks out the PR's
@@ -44,6 +45,11 @@ workspace.
    `herdr worktree open --label <label> --focus`. pi writes the label (for
    example `PR #101 Add dark mode toggle`). pi starts working on the label
    while worktrunk runs, so you don't wait for it afterwards.
+
+By default, the focus moves to the item's workspace and the dashboard closes.
+With `focus = false` in the `[open]` section of the config, the plugin opens
+the item without moving the focus and goes back to the dashboard, so you can
+open several items in a row. See [Configuration](#configuration).
 
 If pi is unavailable or times out, the plugin falls back to `<PR|Issue> #N
 <title>` for labels and `issue-<N>` for branch names, and says so in the pane.
@@ -174,6 +180,11 @@ width = "90%"
 height = "90%"
 # Maximum number of review requests and of issues to fetch (1 to 100).
 limit = 100
+
+[open]
+# true: move the focus to the opened workspace and close the dashboard.
+# false: open in the background and stay in the dashboard.
+focus = true
 ```
 
 Environment variables take precedence over the file:

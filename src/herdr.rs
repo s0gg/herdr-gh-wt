@@ -115,13 +115,15 @@ impl Herdr {
         Ok(())
     }
 
-    /// Open an existing checkout of `repo_root` as a focused worktree workspace.
+    /// Open an existing checkout of `repo_root` as a worktree workspace,
+    /// moving the focus to it when `focus` is set.
     pub fn worktree_open(
         &self,
         runner: &dyn Runner,
         repo_root: &Path,
         path: &Path,
         label: &str,
+        focus: bool,
     ) -> Result<()> {
         runner.stdout(&self.cmd([
             "worktree",
@@ -132,7 +134,7 @@ impl Herdr {
             &path_str(path),
             "--label",
             label,
-            "--focus",
+            if focus { "--focus" } else { "--no-focus" },
             "--json",
         ]))?;
         Ok(())
@@ -275,6 +277,7 @@ mod tests {
                 Path::new("/r/app"),
                 Path::new("/r/app.fix"),
                 "Issue #1 Fix",
+                true,
             )
             .unwrap();
         let calls = runner.calls();
@@ -294,6 +297,22 @@ mod tests {
                 "--json"
             ]
         );
+    }
+
+    #[test]
+    fn worktree_open_can_leave_the_focus_alone() {
+        let runner = FakeRunner::new(|_| Ok(Output::ok("{}")));
+        Herdr::new("herdr")
+            .worktree_open(
+                &runner,
+                Path::new("/r/app"),
+                Path::new("/r/app.fix"),
+                "x",
+                false,
+            )
+            .unwrap();
+        let line = runner.lines().remove(0);
+        assert!(line.ends_with("--label x --no-focus --json"), "{line}");
     }
 
     #[test]

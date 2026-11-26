@@ -78,6 +78,7 @@ fn dashboard() -> Result<()> {
         runner: Arc::clone(&runner),
         herdr: Herdr::from_env(&env),
         pi: config.pi.clone(),
+        focus: config.open.focus,
     };
     let limit = config.dashboard.limit;
 
@@ -108,8 +109,9 @@ fn dashboard() -> Result<()> {
                     _ => unreachable!(),
                 };
                 ratatui::restore();
-                if open(&opener, &item, choose_base) {
-                    return Ok(());
+                match open(&opener, &item, choose_base) {
+                    AfterOpen::Exit => return Ok(()),
+                    AfterOpen::Back(notice) => app.notice = notice,
                 }
                 terminal = ratatui::init();
             }
@@ -151,10 +153,19 @@ fn browse(runner: &Arc<dyn Runner + Send + Sync>, item: &Item, app: &mut App) {
     });
 }
 
+/// What the dashboard does once an item was opened (or not).
+enum AfterOpen {
+    /// Close the dashboard.
+    Exit,
+    /// Go back to the dashboard, optionally with a notice.
+    Back(Option<String>),
+}
+
 /// Open `item` outside the TUI so worktrunk's hooks and prompts are visible.
 /// With `choose_base`, a new issue branch starts from a branch the user picks.
-/// Returns true when the dashboard should exit.
-fn open(opener: &Opener, item: &Item, choose_base: bool) -> bool {
+/// When the focus moves to the item, the dashboard closes; otherwise it stays
+/// so more items can be opened.
+fn open(opener: &Opener, item: &Item, choose_base: bool) -> AfterOpen {
     print!("\x1b[2J\x1b[H");
     println!(
         "\x1b[1mOpening {} {}\x1b[0m: {}\n",
@@ -172,13 +183,26 @@ fn open(opener: &Opener, item: &Item, choose_base: bool) -> bool {
     } else {
         opener.open(item, &mut log)
     };
+    let name = format!("{} {}", item.repo, item.reference());
     match result {
-        Ok(Outcome::Focused { .. } | Outcome::Opened { .. }) => true,
-        Ok(Outcome::Cancelled) => false,
+        Ok(Outcome::AlreadyOpen { .. } | Outcome::Opened { .. }) if opener.focus => AfterOpen::Exit,
+        Ok(Outcome::AlreadyOpen { .. }) => {
+            AfterOpen::Back(Some(format!("{name} is already open in Herdr")))
+        }
+        Ok(Outcome::Opened { label, .. }) => AfterOpen::Back(Some(format!(
+            "Opened {name} in the background as \"{label}\""
+        ))),
+        Ok(Outcome::Cancelled) => AfterOpen::Back(None),
         Err(err) => {
             println!("\n\x1b[31m✗ {err:#}\x1b[0m");
-            wait_for_enter("\nPress Enter to return to the dashboard, or q and Enter to close.")
-                .eq_ignore_ascii_case("q")
+            let answer = wait_for_enter(
+                "\nPress Enter to return to the dashboard, or q and Enter to close.",
+            );
+            if answer.eq_ignore_ascii_case("q") {
+                AfterOpen::Exit
+            } else {
+                AfterOpen::Back(None)
+            }
         }
     }
 }

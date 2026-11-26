@@ -30,8 +30,9 @@ pub const ISSUE_CONFIG_KEY: &str = "herdr-gh-wt-issue";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Outcome {
-    /// The item was already open; its workspace got the focus.
-    Focused { workspace_id: String },
+    /// The item was already open in `workspace_id`, which got the focus
+    /// when [`Opener::focus`] is set.
+    AlreadyOpen { workspace_id: String },
     /// The worktree was opened as a new workspace.
     Opened { path: PathBuf, label: String },
     /// The user backed out (for example of choosing a base branch).
@@ -46,6 +47,8 @@ pub struct Opener {
     pub runner: Arc<dyn Runner + Send + Sync>,
     pub herdr: Herdr,
     pub pi: PiConfig,
+    /// Move the focus to the item's workspace.
+    pub focus: bool,
 }
 
 impl Opener {
@@ -90,7 +93,7 @@ impl Opener {
             .as_deref()
             .and_then(|b| open_workspace_of_branch(&list, b))
         {
-            return self.focus(&id, log);
+            return self.already_open(&id, log);
         }
 
         let creates_issue_branch = item.kind == Kind::Issue && known_branch.is_none();
@@ -132,11 +135,11 @@ impl Opener {
             .find(|w| same_path(&w.path, &switched.path))
             .and_then(|w| w.open_workspace_id.clone())
         {
-            return self.focus(&id, log);
+            return self.already_open(&id, log);
         }
         if same_path(&switched.path, &root) {
             let id = list.source.source_workspace_id.unwrap_or(root_workspace);
-            return self.focus(&id, log);
+            return self.already_open(&id, log);
         }
 
         let label = match label.recv() {
@@ -154,17 +157,21 @@ impl Opener {
             switched.path.display()
         ));
         self.herdr
-            .worktree_open(runner, &root, &switched.path, &label)?;
+            .worktree_open(runner, &root, &switched.path, &label, self.focus)?;
         Ok(Outcome::Opened {
             path: switched.path,
             label,
         })
     }
 
-    fn focus(&self, workspace_id: &str, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
-        log("Already open in Herdr; focusing it");
-        self.herdr.workspace_focus(&*self.runner, workspace_id)?;
-        Ok(Outcome::Focused {
+    fn already_open(&self, workspace_id: &str, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
+        if self.focus {
+            log("Already open in Herdr; focusing it");
+            self.herdr.workspace_focus(&*self.runner, workspace_id)?;
+        } else {
+            log("Already open in Herdr");
+        }
+        Ok(Outcome::AlreadyOpen {
             workspace_id: workspace_id.to_string(),
         })
     }
@@ -712,6 +719,10 @@ mod tests {
     }
 
     fn run_with(world: World, item: &Item, choose_base: Option<ChooseBase>) -> Run {
+        run_full(world, item, choose_base, true)
+    }
+
+    fn run_full(world: World, item: &Item, choose_base: Option<ChooseBase>, focus: bool) -> Run {
         let world = Arc::new(Mutex::new(world));
         let shared = world.clone();
         let runner = Arc::new(FakeRunner::new(move |cmd| simulate(shared.clone(), cmd)));
@@ -719,6 +730,7 @@ mod tests {
             runner: runner.clone(),
             herdr: Herdr::new("herdr"),
             pi: Config::default().pi,
+            focus,
         };
         let mut log = Vec::new();
         let outcome = opener.open_with(item, choose_base, &mut |line| log.push(line.to_string()));
@@ -771,6 +783,7 @@ mod tests {
             runner: runner.clone(),
             herdr: Herdr::new("herdr"),
             pi: Config::default().pi,
+            focus: true,
         }
         .open(&pr(), &mut |_| {})
         .unwrap();
@@ -791,7 +804,7 @@ mod tests {
         let r = run(world, &pr());
         assert_eq!(
             r.outcome.as_ref().unwrap().clone(),
-            Outcome::Focused {
+            Outcome::AlreadyOpen {
                 workspace_id: "w5".into()
             }
         );
@@ -801,6 +814,35 @@ mod tests {
             !ran(&r, "pi "),
             "no label is generated for an open workspace"
         );
+    }
+
+    #[test]
+    fn opens_in_the_background_when_focus_is_off() {
+        let r = run_full(World::default(), &pr(), None, false);
+        assert!(
+            matches!(r.outcome, Ok(Outcome::Opened { .. })),
+            "{:?}",
+            r.outcome
+        );
+        let open = r.lines.last().unwrap();
+        assert!(open.starts_with("herdr worktree open"), "{open}");
+        assert!(open.ends_with("--no-focus --json"), "{open}");
+    }
+
+    #[test]
+    fn leaves_an_open_workspace_alone_when_focus_is_off() {
+        let mut world = World::default();
+        world
+            .worktrees
+            .push(("feat/x".into(), format!("{ROOT}.feat-x"), Some("w5".into())));
+        let r = run_full(world, &pr(), None, false);
+        assert_eq!(
+            r.outcome.as_ref().unwrap(),
+            &Outcome::AlreadyOpen {
+                workspace_id: "w5".into()
+            }
+        );
+        assert!(!ran(&r, "herdr workspace focus"), "{:#?}", r.lines);
     }
 
     #[test]
@@ -950,7 +992,7 @@ mod tests {
         let r = run(world, &issue());
         assert_eq!(
             r.outcome.as_ref().unwrap().clone(),
-            Outcome::Focused {
+            Outcome::AlreadyOpen {
                 workspace_id: "w8".into()
             }
         );
@@ -1145,7 +1187,7 @@ mod tests {
         let r = run(world, &issue());
         assert_eq!(
             r.outcome.as_ref().unwrap().clone(),
-            Outcome::Focused {
+            Outcome::AlreadyOpen {
                 workspace_id: "w1".into()
             }
         );
