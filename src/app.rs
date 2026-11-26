@@ -356,11 +356,14 @@ pub fn requested_via(item: &Item, viewer: &str) -> String {
         .join(", ")
 }
 
-/// Compact age of an RFC 3339 timestamp: `now`, `5m`, `3h`, `2d`, `3w`, `4mo`, `2y`.
+/// Compact age of a GitHub timestamp: `now`, `5m`, `3h`, `2d`, `3w`, `4mo`,
+/// `2y`; empty when the timestamp can't be read.
 pub fn age(timestamp: &str, now: SystemTime) -> String {
-    let Ok(then) = humantime::parse_rfc3339(timestamp) else {
-        return String::new();
-    };
+    parse_timestamp(timestamp).map_or_else(String::new, |then| age_of(then, now))
+}
+
+/// Compact time from `then` to `now`; `now` when `then` is in the future.
+pub fn age_of(then: SystemTime, now: SystemTime) -> String {
     let secs = now.duration_since(then).map(|d| d.as_secs()).unwrap_or(0);
     let (minutes, hours, days) = (secs / 60, secs / 3600, secs / 86_400);
     match () {
@@ -372,6 +375,81 @@ pub fn age(timestamp: &str, now: SystemTime) -> String {
         _ if days < 365 => format!("{}mo", days / 30),
         _ => format!("{}y", days / 365),
     }
+}
+
+/// Parse a UTC timestamp as GitHub returns it, `2026-11-26T02:43:56Z`
+/// (optionally with fractional seconds). Dates before 1970 are rejected.
+pub fn parse_timestamp(text: &str) -> Option<SystemTime> {
+    let rest = text.strip_suffix('Z')?;
+    let (main, fraction) = match rest.split_once('.') {
+        Some((main, fraction)) => (main, Some(fraction)),
+        None => (rest, None),
+    };
+    let b = main.as_bytes();
+    if b.len() != 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || b[10] != b'T'
+        || b[13] != b':'
+        || b[16] != b':'
+    {
+        return None;
+    }
+    let number = |range: std::ops::Range<usize>| -> Option<u64> {
+        let digits = &main[range];
+        digits
+            .bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| digits.parse().ok())?
+    };
+    let (year, month, day) = (number(0..4)?, number(5..7)?, number(8..10)?);
+    let (hour, minute, second) = (number(11..13)?, number(14..16)?, number(17..19)?);
+    if year < 1970 || !(1..=12).contains(&month) || day == 0 || day > days_in_month(year, month) {
+        return None;
+    }
+    if hour > 23 || minute > 59 || second > 60 {
+        return None;
+    }
+
+    let nanos = match fraction {
+        None => 0,
+        Some(f) if !f.is_empty() && f.bytes().all(|c| c.is_ascii_digit()) => {
+            // Keep the first nine digits: nanosecond precision.
+            let digits: String = f.chars().chain(std::iter::repeat('0')).take(9).collect();
+            digits.parse().ok()?
+        }
+        Some(_) => return None,
+    };
+
+    let days = days_since_epoch(year, month, day);
+    let secs = days * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(SystemTime::UNIX_EPOCH + std::time::Duration::new(secs, nanos))
+}
+
+fn is_leap_year(year: u64) -> bool {
+    year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400))
+}
+
+fn days_in_month(year: u64, month: u64) -> u64 {
+    match month {
+        2 if is_leap_year(year) => 29,
+        2 => 28,
+        4 | 6 | 9 | 11 => 30,
+        _ => 31,
+    }
+}
+
+/// Days from 1970-01-01 to the given date (Howard Hinnant's algorithm,
+/// for dates from 1970 on).
+fn days_since_epoch(year: u64, month: u64, day: u64) -> u64 {
+    // Count years from March, so the leap day ends the year.
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year / 400;
+    let year_of_era = year - era * 400;
+    let month_from_march = (month + 9) % 12;
+    let day_of_year = (153 * month_from_march + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
 }
 
 #[cfg(test)]
@@ -748,9 +826,69 @@ pub(crate) mod tests {
         assert_eq!(requested_via(&pr, "octocat"), "");
     }
 
+    fn at(secs: u64) -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(secs)
+    }
+
+    #[test]
+    fn parses_utc_timestamps() {
+        assert_eq!(
+            parse_timestamp("1970-01-01T00:00:00Z"),
+            Some(SystemTime::UNIX_EPOCH)
+        );
+        assert_eq!(
+            parse_timestamp("2026-11-26T12:00:00Z"),
+            Some(at(1_795_694_400))
+        );
+        assert_eq!(
+            parse_timestamp("2024-02-29T23:59:59Z"),
+            Some(at(1_709_251_199)),
+            "leap day"
+        );
+        assert_eq!(
+            parse_timestamp("2000-03-01T00:00:00Z"),
+            Some(at(951_868_800))
+        );
+        assert_eq!(
+            parse_timestamp("2026-11-26T12:00:00.250Z"),
+            Some(at(1_795_694_400) + std::time::Duration::from_millis(250)),
+            "fractional seconds"
+        );
+    }
+
+    #[test]
+    fn rejects_malformed_timestamps() {
+        for bad in [
+            "",
+            "garbage",
+            "2026-11-26",
+            "2026-11-26T12:00:00",
+            "2026-11-26T12:00:00+09:00",
+            "2026-11-26 12:00:00Z",
+            "2026-13-01T00:00:00Z",
+            "2026-00-01T00:00:00Z",
+            "2023-02-29T00:00:00Z",
+            "2026-04-31T00:00:00Z",
+            "2026-11-26T24:00:00Z",
+            "2026-11-26T12:60:00Z",
+            "2026-11-26T12:00:61Z",
+            "2026-11-26T12:00:00.Z",
+            "1969-12-31T23:59:59Z",
+            "+026-11-26T12:00:00Z",
+        ] {
+            assert_eq!(parse_timestamp(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn age_of_compares_two_instants() {
+        assert_eq!(age_of(at(0), at(90)), "1m");
+        assert_eq!(age_of(at(100), at(0)), "now", "clock skew");
+    }
+
     #[test]
     fn age_is_compact() {
-        let now = humantime::parse_rfc3339("2026-11-26T12:00:00Z").unwrap();
+        let now = parse_timestamp("2026-11-26T12:00:00Z").unwrap();
         assert_eq!(age("2026-11-26T11:59:30Z", now), "now");
         assert_eq!(age("2026-11-26T11:55:00Z", now), "5m");
         assert_eq!(age("2026-11-26T09:00:00Z", now), "3h");

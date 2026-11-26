@@ -11,7 +11,7 @@ use ratatui::widgets::{
     Wrap,
 };
 
-use crate::app::{App, Load, Mode, Section, age, requested_via};
+use crate::app::{App, Load, Mode, Section, age, age_of, requested_via};
 use crate::base_picker::BasePicker;
 use crate::github::{Item, Kind};
 
@@ -155,8 +155,7 @@ fn render_header(frame: &mut Frame, area: Rect, app: &App, now: SystemTime) {
         }
         Load::Loaded => {
             if let Some(at) = app.fetched_at {
-                let when = humantime::format_rfc3339_seconds(at).to_string();
-                let ago = age(&when, now);
+                let ago = age_of(at, now);
                 status.push(
                     Span::from(if ago == "now" {
                         "updated just now".to_string()
@@ -517,7 +516,7 @@ mod tests {
 
     fn draw(app: &App, width: u16, height: u16) -> String {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
-        let now = humantime::parse_rfc3339("2026-11-26T03:00:00Z").unwrap();
+        let now = crate::app::parse_timestamp("2026-11-26T03:00:00Z").unwrap();
         terminal.draw(|frame| render(frame, app, now)).unwrap();
         let buffer = terminal.backend().buffer();
         let mut text = String::new();
