@@ -1,0 +1,15 @@
+[package]
+name = "herdr-gh-wt"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+anyhow = "1.0.105"
+humantime = "2.4.0"
+ratatui = "0.30.2"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+toml = "1.2.3"
+
+[dev-dependencies]
+tempfile = "3.27.0"
