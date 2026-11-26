@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
+use crate::config::DashboardConfig;
 use crate::runner::{Cmd, Runner};
 
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
@@ -41,6 +42,24 @@ pub struct PaneOpen {
     pub height: Option<String>,
 }
 
+/// The plugin id declared in `herdr-plugin.toml`.
+pub const DEFAULT_PLUGIN_ID: &str = "gh-wt";
+
+impl PaneOpen {
+    /// The dashboard pane of plugin `plugin_id` (default [`DEFAULT_PLUGIN_ID`]).
+    pub fn dashboard(config: &DashboardConfig, plugin_id: Option<String>) -> Self {
+        PaneOpen {
+            plugin_id: plugin_id
+                .filter(|id| !id.is_empty())
+                .unwrap_or_else(|| DEFAULT_PLUGIN_ID.to_string()),
+            entrypoint: "dashboard".to_string(),
+            placement: config.placement.clone(),
+            width: config.width.clone(),
+            height: config.height.clone(),
+        }
+    }
+}
+
 pub struct Herdr {
     bin: String,
 }
@@ -52,7 +71,11 @@ impl Herdr {
 
     /// The running Herdr binary (`$HERDR_BIN_PATH`), else `herdr` on PATH.
     pub fn from_env(env: &dyn Fn(&str) -> Option<String>) -> Self {
-        Herdr::new(env("HERDR_BIN_PATH").filter(|b| !b.is_empty()).unwrap_or_else(|| "herdr".to_string()))
+        Herdr::new(
+            env("HERDR_BIN_PATH")
+                .filter(|b| !b.is_empty())
+                .unwrap_or_else(|| "herdr".to_string()),
+        )
     }
 
     fn cmd<I, S>(&self, args: I) -> Cmd
@@ -64,7 +87,8 @@ impl Herdr {
     }
 
     pub fn worktree_list(&self, runner: &dyn Runner, cwd: &Path) -> Result<WorktreeList> {
-        let json = runner.stdout(&self.cmd(["worktree", "list", "--cwd", &path_str(cwd), "--json"]))?;
+        let json =
+            runner.stdout(&self.cmd(["worktree", "list", "--cwd", &path_str(cwd), "--json"]))?;
         let response: Envelope<WorktreeList> =
             serde_json::from_str(&json).context("unexpected `herdr worktree list` output")?;
         Ok(response.result)
@@ -92,7 +116,13 @@ impl Herdr {
     }
 
     /// Open an existing checkout of `repo_root` as a focused worktree workspace.
-    pub fn worktree_open(&self, runner: &dyn Runner, repo_root: &Path, path: &Path, label: &str) -> Result<()> {
+    pub fn worktree_open(
+        &self,
+        runner: &dyn Runner,
+        repo_root: &Path,
+        path: &Path,
+        label: &str,
+    ) -> Result<()> {
         runner.stdout(&self.cmd([
             "worktree",
             "open",
@@ -180,7 +210,9 @@ mod tests {
     #[test]
     fn worktree_list_parses_source_and_worktrees() {
         let runner = FakeRunner::new(|_| Ok(Output::ok(LIST)));
-        let list = Herdr::new("herdr").worktree_list(&runner, Path::new("/r/app")).unwrap();
+        let list = Herdr::new("herdr")
+            .worktree_list(&runner, Path::new("/r/app"))
+            .unwrap();
         assert_eq!(runner.lines(), ["herdr worktree list --cwd /r/app --json"]);
         assert_eq!(list.source.repo_root, PathBuf::from("/r/app"));
         assert_eq!(list.source.repo_name, "app");
@@ -194,27 +226,42 @@ mod tests {
 
     #[test]
     fn worktree_list_without_a_workspace() {
-        let json = r#"{"result":{"source":{"repo_root":"/r/app","repo_name":"app"},"worktrees":[]}}"#;
+        let json =
+            r#"{"result":{"source":{"repo_root":"/r/app","repo_name":"app"},"worktrees":[]}}"#;
         let runner = FakeRunner::new(move |_| Ok(Output::ok(json)));
-        let list = Herdr::new("herdr").worktree_list(&runner, Path::new("/r/app")).unwrap();
+        let list = Herdr::new("herdr")
+            .worktree_list(&runner, Path::new("/r/app"))
+            .unwrap();
         assert_eq!(list.source.source_workspace_id, None);
     }
 
     #[test]
     fn worktree_list_reports_failures() {
         let runner = FakeRunner::new(|_| Ok(Output::failed("not a git repository")));
-        let err = Herdr::new("herdr").worktree_list(&runner, Path::new("/x")).unwrap_err();
-        assert!(format!("{err:#}").contains("not a git repository"), "{err:#}");
+        let err = Herdr::new("herdr")
+            .worktree_list(&runner, Path::new("/x"))
+            .unwrap_err();
+        assert!(
+            format!("{err:#}").contains("not a git repository"),
+            "{err:#}"
+        );
     }
 
     #[test]
     fn workspace_create_returns_the_new_id() {
         let runner = FakeRunner::new(|_| {
-            Ok(Output::ok(r#"{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"}}}"#))
+            Ok(Output::ok(
+                r#"{"result":{"workspace":{"workspace_id":"w9"},"tab":{"tab_id":"w9:t1"}}}"#,
+            ))
         });
-        let id = Herdr::new("herdr").workspace_create(&runner, Path::new("/r/app"), "app").unwrap();
+        let id = Herdr::new("herdr")
+            .workspace_create(&runner, Path::new("/r/app"), "app")
+            .unwrap();
         assert_eq!(id, "w9");
-        assert_eq!(runner.lines(), ["herdr workspace create --cwd /r/app --label app --no-focus"]);
+        assert_eq!(
+            runner.lines(),
+            ["herdr workspace create --cwd /r/app --label app --no-focus"]
+        );
     }
 
     #[test]
@@ -223,14 +270,46 @@ mod tests {
         let herdr = Herdr::new("/bin/herdr");
         herdr.workspace_focus(&runner, "w3").unwrap();
         herdr
-            .worktree_open(&runner, Path::new("/r/app"), Path::new("/r/app.fix"), "Issue #1 Fix")
+            .worktree_open(
+                &runner,
+                Path::new("/r/app"),
+                Path::new("/r/app.fix"),
+                "Issue #1 Fix",
+            )
             .unwrap();
         let calls = runner.calls();
         assert_eq!(calls[0].line(), "/bin/herdr workspace focus w3");
         assert_eq!(
             calls[1].args,
-            ["worktree", "open", "--cwd", "/r/app", "--path", "/r/app.fix", "--label", "Issue #1 Fix", "--focus", "--json"]
+            [
+                "worktree",
+                "open",
+                "--cwd",
+                "/r/app",
+                "--path",
+                "/r/app.fix",
+                "--label",
+                "Issue #1 Fix",
+                "--focus",
+                "--json"
+            ]
         );
+    }
+
+    #[test]
+    fn dashboard_pane_follows_the_config() {
+        let mut config = crate::config::Config::default().dashboard;
+        let pane = PaneOpen::dashboard(&config, None);
+        assert_eq!(pane.plugin_id, DEFAULT_PLUGIN_ID);
+        assert_eq!(pane.entrypoint, "dashboard");
+        assert_eq!(pane.placement, "popup");
+        assert_eq!(pane.width.as_deref(), Some("90%"));
+        config.placement = "tab".into();
+        config.height = None;
+        let pane = PaneOpen::dashboard(&config, Some("custom.id".into()));
+        assert_eq!(pane.plugin_id, "custom.id");
+        assert_eq!(pane.placement, "tab");
+        assert_eq!(pane.height, None);
     }
 
     #[test]

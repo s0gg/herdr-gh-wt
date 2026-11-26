@@ -183,10 +183,9 @@ impl Config {
             self.pi.thinking = Some(thinking);
         }
         if let Some(timeout) = get(ENV_PI_TIMEOUT) {
-            self.pi.timeout_secs = timeout
-                .trim()
-                .parse()
-                .with_context(|| format!("{ENV_PI_TIMEOUT} must be a number of seconds, got {timeout:?}"))?;
+            self.pi.timeout_secs = timeout.trim().parse().with_context(|| {
+                format!("{ENV_PI_TIMEOUT} must be a number of seconds, got {timeout:?}")
+            })?;
         }
         Ok(())
     }
@@ -195,9 +194,9 @@ impl Config {
     /// `$HERDR_PLUGIN_CONFIG_DIR/config.toml`.
     pub fn path(env: &dyn Fn(&str) -> Option<String>) -> Option<PathBuf> {
         let get = |key: &str| env(key).filter(|v| !v.is_empty());
-        get(ENV_CONFIG_PATH)
-            .map(PathBuf::from)
-            .or_else(|| get("HERDR_PLUGIN_CONFIG_DIR").map(|dir| Path::new(&dir).join("config.toml")))
+        get(ENV_CONFIG_PATH).map(PathBuf::from).or_else(|| {
+            get("HERDR_PLUGIN_CONFIG_DIR").map(|dir| Path::new(&dir).join("config.toml"))
+        })
     }
 
     /// Read the config file (missing file = defaults) and apply env overrides.
@@ -211,7 +210,8 @@ impl Config {
     }
 
     fn read(path: &Path) -> Result<Self> {
-        let text = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
+        let text =
+            std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Self::from_toml_str(&text).with_context(|| format!("invalid config in {}", path.display()))
     }
 }
@@ -222,8 +222,10 @@ mod tests {
     use std::collections::HashMap;
 
     fn env_from(pairs: &[(&str, &str)]) -> impl Fn(&str) -> Option<String> {
-        let map: HashMap<String, String> =
-            pairs.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let map: HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
         move |key| map.get(key).cloned()
     }
 
@@ -267,7 +269,10 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(config.pi.model.as_deref(), Some("anthropic/claude-haiku-4-5"));
+        assert_eq!(
+            config.pi.model.as_deref(),
+            Some("anthropic/claude-haiku-4-5")
+        );
         assert_eq!(config.pi.provider.as_deref(), Some("anthropic"));
         assert_eq!(config.pi.thinking.as_deref(), Some("low"));
         assert_eq!(config.pi.timeout_secs, 10);
@@ -327,14 +332,19 @@ mod tests {
     #[test]
     fn invalid_env_timeout_is_an_error() {
         let mut config = Config::default();
-        let err = config.apply_env(&env_from(&[(ENV_PI_TIMEOUT, "soon")])).unwrap_err();
+        let err = config
+            .apply_env(&env_from(&[(ENV_PI_TIMEOUT, "soon")]))
+            .unwrap_err();
         assert!(format!("{err:#}").contains(ENV_PI_TIMEOUT), "{err:#}");
     }
 
     #[test]
     fn path_prefers_explicit_env_then_plugin_config_dir() {
         assert_eq!(
-            Config::path(&env_from(&[(ENV_CONFIG_PATH, "/x/c.toml"), ("HERDR_PLUGIN_CONFIG_DIR", "/cfg")])),
+            Config::path(&env_from(&[
+                (ENV_CONFIG_PATH, "/x/c.toml"),
+                ("HERDR_PLUGIN_CONFIG_DIR", "/cfg")
+            ])),
             Some(PathBuf::from("/x/c.toml"))
         );
         assert_eq!(
@@ -347,7 +357,11 @@ mod tests {
     #[test]
     fn load_reads_the_file_and_applies_env() {
         let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join("config.toml"), "[pi]\nmodel = \"file\"\nprovider = \"p\"\n").unwrap();
+        std::fs::write(
+            dir.path().join("config.toml"),
+            "[pi]\nmodel = \"file\"\nprovider = \"p\"\n",
+        )
+        .unwrap();
         let dir_str = dir.path().to_str().unwrap();
         let config = Config::load(&env_from(&[
             ("HERDR_PLUGIN_CONFIG_DIR", dir_str),
@@ -361,8 +375,11 @@ mod tests {
     #[test]
     fn load_without_a_file_uses_defaults() {
         let dir = tempfile::tempdir().unwrap();
-        let config =
-            Config::load(&env_from(&[("HERDR_PLUGIN_CONFIG_DIR", dir.path().to_str().unwrap())])).unwrap();
+        let config = Config::load(&env_from(&[(
+            "HERDR_PLUGIN_CONFIG_DIR",
+            dir.path().to_str().unwrap(),
+        )]))
+        .unwrap();
         assert_eq!(config, Config::default());
     }
 
@@ -370,8 +387,11 @@ mod tests {
     fn load_reports_the_file_on_parse_errors() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("config.toml"), "[pi\n").unwrap();
-        let err = Config::load(&env_from(&[("HERDR_PLUGIN_CONFIG_DIR", dir.path().to_str().unwrap())]))
-            .unwrap_err();
+        let err = Config::load(&env_from(&[(
+            "HERDR_PLUGIN_CONFIG_DIR",
+            dir.path().to_str().unwrap(),
+        )]))
+        .unwrap_err();
         assert!(format!("{err:#}").contains("config.toml"), "{err:#}");
     }
 }

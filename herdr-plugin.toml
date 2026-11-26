@@ -1,0 +1,27 @@
+id = "gh-wt"
+name = "GitHub worktrees"
+version = "0.1.0"
+# Popup panes need Herdr 0.7.4.
+min_herdr_version = "0.7.4"
+description = "Dashboard of pull requests awaiting your review and issues assigned to you; open any of them as a worktrunk worktree workspace"
+platforms = ["linux", "macos"]
+
+# `--target-dir` keeps the binary where the commands below expect it, even
+# when CARGO_TARGET_DIR points elsewhere.
+[[build]]
+command = ["cargo", "build", "--release", "--locked", "--target-dir", "target"]
+
+[[actions]]
+id = "dashboard"
+title = "GitHub: review requests & assigned issues"
+contexts = ["workspace"]
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-gh-wt\" launch"]
+
+# Opened by the action above with the placement and size from config.toml.
+[[panes]]
+id = "dashboard"
+title = "GitHub review requests & assigned issues"
+placement = "popup"
+width = "90%"
+height = "90%"
+command = ["sh", "-c", "exec \"$HERDR_PLUGIN_ROOT/target/release/herdr-gh-wt\" dashboard"]

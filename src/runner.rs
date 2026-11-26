@@ -57,6 +57,21 @@ impl Cmd {
         self
     }
 
+    /// Like [`Cmd::line`], with long or multi-line arguments (such as
+    /// prompts) shown as `…`, for error messages.
+    pub fn summary(&self) -> String {
+        std::iter::once(self.program.as_str())
+            .chain(self.args.iter().map(|a| {
+                if a.contains('\n') || a.chars().count() > 60 {
+                    "…"
+                } else {
+                    a.as_str()
+                }
+            }))
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
     /// `program arg1 arg2 ...` for logs and test assertions.
     pub fn line(&self) -> String {
         std::iter::once(self.program.as_str())
@@ -75,11 +90,19 @@ pub struct Output {
 
 impl Output {
     pub fn ok(stdout: impl Into<String>) -> Self {
-        Output { success: true, stdout: stdout.into(), stderr: String::new() }
+        Output {
+            success: true,
+            stdout: stdout.into(),
+            stderr: String::new(),
+        }
     }
 
     pub fn failed(stderr: impl Into<String>) -> Self {
-        Output { success: false, stdout: String::new(), stderr: stderr.into() }
+        Output {
+            success: false,
+            stdout: String::new(),
+            stderr: stderr.into(),
+        }
     }
 }
 
@@ -93,9 +116,9 @@ pub trait Runner: Sync {
         if !out.success {
             let detail = out.stderr.trim();
             if detail.is_empty() {
-                bail!("`{}` failed", cmd.line());
+                bail!("`{}` failed", cmd.summary());
             }
-            bail!("`{}` failed: {detail}", cmd.line());
+            bail!("`{}` failed: {detail}", cmd.summary());
         }
         Ok(out.stdout)
     }
@@ -117,7 +140,10 @@ impl Runner for SystemRunner {
         }
         match cmd.io {
             Io::Capture => {
-                command.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
+                command
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped());
                 // A timed-out command is killed together with its children.
                 // Only done for commands detached from the terminal: a process
                 // outside the foreground group can't read from it.
@@ -126,10 +152,16 @@ impl Runner for SystemRunner {
                 }
             }
             Io::CaptureStdout => {
-                command.stdin(Stdio::inherit()).stdout(Stdio::piped()).stderr(Stdio::inherit());
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::inherit());
             }
             Io::Inherit => {
-                command.stdin(Stdio::inherit()).stdout(Stdio::inherit()).stderr(Stdio::inherit());
+                command
+                    .stdin(Stdio::inherit())
+                    .stdout(Stdio::inherit())
+                    .stderr(Stdio::inherit());
             }
         }
 
@@ -146,8 +178,18 @@ impl Runner for SystemRunner {
                 String::from_utf8_lossy(&buf).into_owned()
             })
         };
-        let stdout = reader(child.stdout.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
-        let stderr = reader(child.stderr.take().map(|p| Box::new(p) as Box<dyn Read + Send>));
+        let stdout = reader(
+            child
+                .stdout
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        );
+        let stderr = reader(
+            child
+                .stderr
+                .take()
+                .map(|p| Box::new(p) as Box<dyn Read + Send>),
+        );
 
         let status = match cmd.timeout {
             None => child.wait()?,
@@ -168,7 +210,11 @@ impl Runner for SystemRunner {
                         let _ = child.wait();
                         // The reader threads finish once the pipes close; don't
                         // wait for grandchildren that might still hold them.
-                        bail!("`{}` timed out after {}s", cmd.line(), timeout.as_secs_f32());
+                        bail!(
+                            "`{}` timed out after {}s",
+                            cmd.summary(),
+                            timeout.as_secs_f32()
+                        );
                     }
                     std::thread::sleep(Duration::from_millis(25));
                 }
@@ -198,7 +244,10 @@ pub mod fake {
 
     impl FakeRunner {
         pub fn new(handler: impl Fn(&Cmd) -> Result<Output> + Send + Sync + 'static) -> Self {
-            FakeRunner { calls: Mutex::new(Vec::new()), handler: Box::new(handler) }
+            FakeRunner {
+                calls: Mutex::new(Vec::new()),
+                handler: Box::new(handler),
+            }
         }
 
         pub fn calls(&self) -> Vec<Cmd> {
@@ -245,12 +294,18 @@ mod tests {
     fn runs_in_the_requested_directory() {
         let dir = tempfile::tempdir().unwrap();
         let out = SystemRunner.run(&sh("pwd -P").cwd(dir.path())).unwrap();
-        assert_eq!(out.stdout.trim(), dir.path().canonicalize().unwrap().to_str().unwrap());
+        assert_eq!(
+            out.stdout.trim(),
+            dir.path().canonicalize().unwrap().to_str().unwrap()
+        );
     }
 
     #[test]
     fn missing_program_is_an_error() {
-        let err = SystemRunner.run(&Cmd::new("definitely-not-a-real-program-xyz", Vec::<String>::new()));
+        let err = SystemRunner.run(&Cmd::new(
+            "definitely-not-a-real-program-xyz",
+            Vec::<String>::new(),
+        ));
         assert!(err.is_err());
     }
 
@@ -265,8 +320,40 @@ mod tests {
     }
 
     #[test]
+    fn summary_elides_long_or_multiline_arguments() {
+        let cmd = Cmd::new("pi", ["-p", "--", "first line\nsecond line"]);
+        assert_eq!(cmd.summary(), "pi -p -- …");
+        let long = "x".repeat(100);
+        assert_eq!(
+            Cmd::new("wt", ["switch", long.as_str()]).summary(),
+            "wt switch …"
+        );
+        assert_eq!(
+            Cmd::new("wt", ["switch", "pr:7"]).summary(),
+            "wt switch pr:7"
+        );
+    }
+
+    #[test]
+    fn errors_name_the_command_by_its_summary() {
+        let err = SystemRunner
+            .stdout(&sh("echo broken >&2; exit 1\n# second line"))
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains("second line"), "{err:#}");
+        let err = SystemRunner
+            .run(
+                &Cmd::new("sh", ["-c", "sleep 5\n# second line"])
+                    .timeout(Duration::from_millis(100)),
+            )
+            .unwrap_err();
+        assert!(!format!("{err:#}").contains("second line"), "{err:#}");
+    }
+
+    #[test]
     fn stdout_helper_surfaces_stderr_on_failure() {
-        let err = SystemRunner.stdout(&sh("echo broken >&2; exit 1")).unwrap_err();
+        let err = SystemRunner
+            .stdout(&sh("echo broken >&2; exit 1"))
+            .unwrap_err();
         assert!(format!("{err:#}").contains("broken"), "{err:#}");
         assert_eq!(SystemRunner.stdout(&sh("printf hi")).unwrap(), "hi");
     }

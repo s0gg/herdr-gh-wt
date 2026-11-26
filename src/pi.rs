@@ -39,7 +39,10 @@ pub fn render_prompt(template: &str, item: &Item) -> String {
     while let Some(start) = rest.find('{') {
         out.push_str(&rest[..start]);
         let after = &rest[start + 1..];
-        match after.find('}').and_then(|end| value(&after[..end]).map(|v| (end, v))) {
+        match after
+            .find('}')
+            .and_then(|end| value(&after[..end]).map(|v| (end, v)))
+        {
             Some((end, v)) => {
                 out.push_str(&v);
                 rest = &after[end + 1..];
@@ -99,19 +102,33 @@ pub fn command(config: &PiConfig, prompt: &str) -> Cmd {
 
 fn ask(runner: &dyn Runner, config: &PiConfig, template: &str, item: &Item) -> Result<String> {
     let prompt = render_prompt(template, item);
-    runner.stdout(&command(config, &prompt))
+    let out = runner.run(&command(config, &prompt))?;
+    if !out.success {
+        let detail = out.stderr.trim();
+        anyhow::bail!(
+            "pi failed: {}",
+            if detail.is_empty() {
+                "no error output"
+            } else {
+                detail
+            }
+        );
+    }
+    Ok(out.stdout)
 }
 
 /// Ask pi for a workspace label for `item`.
 pub fn generate_label(runner: &dyn Runner, config: &PiConfig, item: &Item) -> Result<String> {
     let answer = ask(runner, config, &config.label_prompt, item)?;
-    sanitize_label(&answer, config.label_max_chars).ok_or_else(|| anyhow!("pi returned no usable label"))
+    sanitize_label(&answer, config.label_max_chars)
+        .ok_or_else(|| anyhow!("pi returned no usable label"))
 }
 
 /// Ask pi for a branch slug for `item`.
 pub fn generate_branch(runner: &dyn Runner, config: &PiConfig, item: &Item) -> Result<String> {
     let answer = ask(runner, config, &config.branch_prompt, item)?;
-    sanitize_branch_slug(&answer).ok_or_else(|| anyhow!("pi returned no usable branch name: {:?}", answer.trim()))
+    sanitize_branch_slug(&answer)
+        .ok_or_else(|| anyhow!("pi returned no usable branch name: {:?}", answer.trim()))
 }
 
 /// The label used when pi is unavailable: `PR #12 <title>`.
@@ -146,7 +163,14 @@ mod tests {
     }
 
     fn pr() -> Item {
-        Item { kind: Kind::PullRequest, number: 7, head_ref: Some("feat/x".into()), labels: vec![], body: String::new(), ..issue() }
+        Item {
+            kind: Kind::PullRequest,
+            number: 7,
+            head_ref: Some("feat/x".into()),
+            labels: vec![],
+            body: String::new(),
+            ..issue()
+        }
     }
 
     fn pi_config() -> PiConfig {
@@ -155,15 +179,24 @@ mod tests {
 
     #[test]
     fn renders_every_placeholder() {
-        let out = render_prompt("{kind}|{ref}|{repo}|{number}|{title}|{labels}|{body}", &issue());
-        assert_eq!(out, "issue|Issue #42|acme/app|42|Login times out|bug, auth|Steps to reproduce");
+        let out = render_prompt(
+            "{kind}|{ref}|{repo}|{number}|{title}|{labels}|{body}",
+            &issue(),
+        );
+        assert_eq!(
+            out,
+            "issue|Issue #42|acme/app|42|Login times out|bug, auth|Steps to reproduce"
+        );
         let out = render_prompt("{kind}|{ref}|{labels}|{body}", &pr());
         assert_eq!(out, "pull request|PR #7|(none)|(empty)");
     }
 
     #[test]
     fn long_bodies_are_truncated() {
-        let item = Item { body: "x".repeat(MAX_BODY_CHARS + 100), ..issue() };
+        let item = Item {
+            body: "x".repeat(MAX_BODY_CHARS + 100),
+            ..issue()
+        };
         let out = render_prompt("{body}", &item);
         assert_eq!(out.chars().count(), MAX_BODY_CHARS + 1);
         assert!(out.ends_with('…'));
@@ -173,10 +206,24 @@ mod tests {
     fn command_is_non_interactive_and_isolated() {
         let cmd = command(&pi_config(), "hello");
         assert_eq!(cmd.program, "pi");
-        for flag in ["-p", "--no-session", "--no-tools", "--no-extensions", "--no-skills", "--no-context-files"] {
-            assert!(cmd.args.iter().any(|a| a == flag), "missing {flag} in {:?}", cmd.args);
+        for flag in [
+            "-p",
+            "--no-session",
+            "--no-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-context-files",
+        ] {
+            assert!(
+                cmd.args.iter().any(|a| a == flag),
+                "missing {flag} in {:?}",
+                cmd.args
+            );
         }
-        assert!(!cmd.args.iter().any(|a| a == "--model"), "model is left to pi by default");
+        assert!(
+            !cmd.args.iter().any(|a| a == "--model"),
+            "model is left to pi by default"
+        );
         assert_eq!(cmd.args[cmd.args.len() - 2..], ["--", "hello"]);
         assert_eq!(cmd.timeout, Some(Duration::from_secs(30)));
     }
@@ -193,7 +240,10 @@ mod tests {
         };
         let cmd = command(&config, "hi");
         let line = cmd.line();
-        assert!(line.contains("--model anthropic/claude-haiku-4-5"), "{line}");
+        assert!(
+            line.contains("--model anthropic/claude-haiku-4-5"),
+            "{line}"
+        );
         assert!(line.contains("--provider anthropic"), "{line}");
         assert!(line.contains("--thinking low"), "{line}");
         assert!(line.contains("--offline -- hi"), "{line}");
@@ -212,14 +262,23 @@ mod tests {
     #[test]
     fn generate_label_respects_the_length_limit() {
         let runner = FakeRunner::new(|_| Ok(Output::ok("abcdefghijklmnopqrstuvwxyz")));
-        let config = PiConfig { label_max_chars: 10, ..pi_config() };
-        assert_eq!(generate_label(&runner, &config, &issue()).unwrap(), "abcdefghi…");
+        let config = PiConfig {
+            label_max_chars: 10,
+            ..pi_config()
+        };
+        assert_eq!(
+            generate_label(&runner, &config, &issue()).unwrap(),
+            "abcdefghi…"
+        );
     }
 
     #[test]
     fn generate_branch_returns_a_slug() {
         let runner = FakeRunner::new(|_| Ok(Output::ok("`Fix-Login-Timeout`\n")));
-        assert_eq!(generate_branch(&runner, &pi_config(), &issue()).unwrap(), "fix-login-timeout");
+        assert_eq!(
+            generate_branch(&runner, &pi_config(), &issue()).unwrap(),
+            "fix-login-timeout"
+        );
         let prompt = runner.calls()[0].args.last().unwrap().clone();
         assert!(prompt.contains("branch name"), "{prompt}");
     }
@@ -230,9 +289,9 @@ mod tests {
         assert!(generate_branch(&blank, &pi_config(), &issue()).is_err());
         assert!(generate_label(&blank, &pi_config(), &issue()).is_err());
 
-        let failing = FakeRunner::new(|_| Ok(Output::failed("No API key")));
+        let failing = FakeRunner::new(|_| Ok(Output::failed("Error: No API key\n")));
         let err = generate_label(&failing, &pi_config(), &issue()).unwrap_err();
-        assert!(format!("{err:#}").contains("No API key"), "{err:#}");
+        assert_eq!(format!("{err:#}"), "pi failed: Error: No API key");
     }
 
     #[test]

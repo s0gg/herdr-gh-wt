@@ -63,9 +63,11 @@ pub struct Dashboard {
 
 /// Search for open pull requests that request a review from you, directly or
 /// through one of your teams.
-pub const REVIEW_REQUESTS_QUERY: &str = "is:open is:pr review-requested:@me archived:false sort:updated-desc";
+pub const REVIEW_REQUESTS_QUERY: &str =
+    "is:open is:pr review-requested:@me archived:false sort:updated-desc";
 /// Search for open issues assigned to you.
-pub const ASSIGNED_ISSUES_QUERY: &str = "is:open is:issue assignee:@me archived:false sort:updated-desc";
+pub const ASSIGNED_ISSUES_QUERY: &str =
+    "is:open is:issue assignee:@me archived:false sort:updated-desc";
 
 pub const GRAPHQL: &str = "\
 query($prQuery: String!, $issueQuery: String!, $limit: Int!) {
@@ -121,13 +123,27 @@ pub fn fetch_command(limit: u32) -> Cmd {
     )
 }
 
+/// `gh browse` invocation that opens `item` in the web browser.
+pub fn browse_command(item: &Item) -> Cmd {
+    Cmd::new(
+        "gh",
+        [
+            "browse".to_string(),
+            item.number.to_string(),
+            "--repo".to_string(),
+            format!("{}/{}", item.host, item.repo),
+        ],
+    )
+}
+
 pub fn fetch(runner: &dyn Runner, limit: u32) -> Result<Dashboard> {
     let json = runner.stdout(&fetch_command(limit))?;
     parse_dashboard(&json)
 }
 
 pub fn parse_dashboard(json: &str) -> Result<Dashboard> {
-    let response: Response = serde_json::from_str(json).context("unexpected response from GitHub")?;
+    let response: Response =
+        serde_json::from_str(json).context("unexpected response from GitHub")?;
     if let Some(errors) = response.errors.filter(|e| !e.is_empty()) {
         let messages: Vec<_> = errors.into_iter().map(|e| e.message).collect();
         anyhow::bail!("GitHub API error: {}", messages.join("; "));
@@ -209,8 +225,13 @@ struct ReviewRequest {
 #[derive(Deserialize)]
 #[serde(tag = "__typename")]
 enum RequestedReviewer {
-    User { login: String },
-    Team { slug: String, organization: Login },
+    User {
+        login: String,
+    },
+    Team {
+        slug: String,
+        organization: Login,
+    },
     #[serde(other)]
     Other,
 }
@@ -246,7 +267,10 @@ impl Node {
             url,
             author: self.author.map(|a| a.login),
             updated_at: self.updated_at.unwrap_or_default(),
-            labels: self.labels.map(|l| l.nodes.into_iter().map(|n| n.name).collect()).unwrap_or_default(),
+            labels: self
+                .labels
+                .map(|l| l.nodes.into_iter().map(|n| n.name).collect())
+                .unwrap_or_default(),
             body: self.body_text.unwrap_or_default(),
             is_draft: self.is_draft,
             head_ref: self.head_ref_name,
@@ -258,7 +282,10 @@ impl Node {
                         .filter_map(|req| match req.requested_reviewer? {
                             RequestedReviewer::User { login } => Some(Reviewer::User(login)),
                             RequestedReviewer::Team { slug, organization } => {
-                                Some(Reviewer::Team { org: organization.login, slug })
+                                Some(Reviewer::Team {
+                                    org: organization.login,
+                                    slug,
+                                })
                             }
                             RequestedReviewer::Other => None,
                         })
@@ -319,7 +346,11 @@ mod tests {
     fn parses_viewer_pull_requests_and_issues() {
         let dashboard = parse_dashboard(RESPONSE).unwrap();
         assert_eq!(dashboard.viewer, "octocat");
-        assert_eq!(dashboard.review_requests.len(), 2, "empty nodes (non-matching fragments) are skipped");
+        assert_eq!(
+            dashboard.review_requests.len(),
+            2,
+            "empty nodes (non-matching fragments) are skipped"
+        );
         assert_eq!(dashboard.assigned_issues.len(), 1);
 
         let pr = &dashboard.review_requests[0];
@@ -337,7 +368,10 @@ mod tests {
         assert_eq!(
             pr.reviewers,
             vec![
-                Reviewer::Team { org: "acme".into(), slug: "frontend".into() },
+                Reviewer::Team {
+                    org: "acme".into(),
+                    slug: "frontend".into()
+                },
                 Reviewer::User("octocat".into()),
             ]
         );
@@ -358,8 +392,22 @@ mod tests {
     }
 
     #[test]
+    fn browse_command_opens_the_item_in_its_repository() {
+        let dashboard = parse_dashboard(RESPONSE).unwrap();
+        assert_eq!(
+            browse_command(&dashboard.review_requests[0]).line(),
+            "gh browse 101 --repo github.com/acme/app"
+        );
+        assert_eq!(
+            browse_command(&dashboard.review_requests[1]).line(),
+            "gh browse 7 --repo ghe.example.com/acme/lib"
+        );
+    }
+
+    #[test]
     fn graphql_errors_are_reported() {
-        let err = parse_dashboard(r#"{"data":null,"errors":[{"message":"Bad credentials"}]}"#).unwrap_err();
+        let err = parse_dashboard(r#"{"data":null,"errors":[{"message":"Bad credentials"}]}"#)
+            .unwrap_err();
         assert!(format!("{err:#}").contains("Bad credentials"), "{err:#}");
     }
 
@@ -369,15 +417,31 @@ mod tests {
         assert_eq!(cmd.program, "gh");
         assert_eq!(&cmd.args[..2], ["api", "graphql"]);
         assert!(cmd.args.contains(&format!("query={GRAPHQL}")));
-        assert!(cmd.args.contains(&format!("prQuery={REVIEW_REQUESTS_QUERY}")));
-        assert!(cmd.args.contains(&format!("issueQuery={ASSIGNED_ISSUES_QUERY}")));
+        assert!(
+            cmd.args
+                .contains(&format!("prQuery={REVIEW_REQUESTS_QUERY}"))
+        );
+        assert!(
+            cmd.args
+                .contains(&format!("issueQuery={ASSIGNED_ISSUES_QUERY}"))
+        );
         assert!(cmd.args.windows(2).any(|w| w == ["-F", "limit=50"]));
     }
 
     #[test]
     fn fetch_clamps_the_limit_to_the_search_maximum() {
-        assert!(fetch_command(500).args.windows(2).any(|w| w == ["-F", "limit=100"]));
-        assert!(fetch_command(0).args.windows(2).any(|w| w == ["-F", "limit=1"]));
+        assert!(
+            fetch_command(500)
+                .args
+                .windows(2)
+                .any(|w| w == ["-F", "limit=100"])
+        );
+        assert!(
+            fetch_command(0)
+                .args
+                .windows(2)
+                .any(|w| w == ["-F", "limit=1"])
+        );
     }
 
     #[test]
@@ -390,7 +454,11 @@ mod tests {
 
     #[test]
     fn fetch_surfaces_gh_failures() {
-        let runner = FakeRunner::new(|_| Ok(Output::failed("gh: To get started with GitHub CLI, please run: gh auth login")));
+        let runner = FakeRunner::new(|_| {
+            Ok(Output::failed(
+                "gh: To get started with GitHub CLI, please run: gh auth login",
+            ))
+        });
         let err = fetch(&runner, 100).unwrap_err();
         assert!(format!("{err:#}").contains("gh auth login"), "{err:#}");
     }

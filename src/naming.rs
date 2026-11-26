@@ -61,11 +61,19 @@ pub fn unique_branch(slug: &str, exists: impl Fn(&str) -> bool) -> String {
 /// The first line that still has content once surrounding whitespace and
 /// wrapping quotes/backticks are removed.
 fn first_meaningful_line(raw: &str) -> Option<&str> {
-    raw.lines().map(strip_wrapping).find(|line| !line.is_empty())
+    raw.lines()
+        .map(strip_wrapping)
+        .find(|line| !line.is_empty())
 }
 
 fn strip_wrapping(line: &str) -> &str {
-    const PAIRS: [(char, char); 5] = [('"', '"'), ('\'', '\''), ('`', '`'), ('「', '」'), ('“', '”')];
+    const PAIRS: [(char, char); 5] = [
+        ('"', '"'),
+        ('\'', '\''),
+        ('`', '`'),
+        ('「', '」'),
+        ('“', '”'),
+    ];
     let mut line = line.trim();
     loop {
         let before = line;
@@ -88,7 +96,10 @@ mod tests {
 
     #[test]
     fn slug_keeps_clean_kebab_case() {
-        assert_eq!(sanitize_branch_slug("fix-login-timeout").as_deref(), Some("fix-login-timeout"));
+        assert_eq!(
+            sanitize_branch_slug("fix-login-timeout").as_deref(),
+            Some("fix-login-timeout")
+        );
     }
 
     #[test]
@@ -97,7 +108,10 @@ mod tests {
             sanitize_branch_slug("\n  `Fix-Login-Timeout`  \nbecause ...").as_deref(),
             Some("fix-login-timeout")
         );
-        assert_eq!(sanitize_branch_slug("\"add-csv-export\"").as_deref(), Some("add-csv-export"));
+        assert_eq!(
+            sanitize_branch_slug("\"add-csv-export\"").as_deref(),
+            Some("add-csv-export")
+        );
     }
 
     #[test]
@@ -144,18 +158,27 @@ mod tests {
             sanitize_label("\n\"PR #12 Fix login\"\nexplanation", 40).as_deref(),
             Some("PR #12 Fix login")
         );
-        assert_eq!(sanitize_label("「#3 画面の修正」", 40).as_deref(), Some("#3 画面の修正"));
+        assert_eq!(
+            sanitize_label("「#3 画面の修正」", 40).as_deref(),
+            Some("#3 画面の修正")
+        );
         assert_eq!(sanitize_label("`#3 fix`", 40).as_deref(), Some("#3 fix"));
     }
 
     #[test]
     fn label_collapses_whitespace() {
-        assert_eq!(sanitize_label("  PR  #1 \t a ", 40).as_deref(), Some("PR #1 a"));
+        assert_eq!(
+            sanitize_label("  PR  #1 \t a ", 40).as_deref(),
+            Some("PR #1 a")
+        );
     }
 
     #[test]
     fn label_is_truncated_by_characters_with_ellipsis() {
-        assert_eq!(sanitize_label("あいうえおかきくけこ", 5).as_deref(), Some("あいうえ…"));
+        assert_eq!(
+            sanitize_label("あいうえおかきくけこ", 5).as_deref(),
+            Some("あいうえ…")
+        );
         assert_eq!(sanitize_label("abcde", 5).as_deref(), Some("abcde"));
     }
 
@@ -169,6 +192,9 @@ mod tests {
     fn unique_branch_appends_counter_until_free() {
         assert_eq!(unique_branch("fix", |_| false), "fix");
         assert_eq!(unique_branch("fix", |b| b == "fix"), "fix-2");
-        assert_eq!(unique_branch("fix", |b| b == "fix" || b == "fix-2"), "fix-3");
+        assert_eq!(
+            unique_branch("fix", |b| b == "fix" || b == "fix-2"),
+            "fix-3"
+        );
     }
 }
