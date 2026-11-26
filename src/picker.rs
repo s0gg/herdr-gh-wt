@@ -44,6 +44,57 @@ impl Entry for BranchCandidate {
     }
 }
 
+/// Why a branch looks like an issue's own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Reason {
+    /// GitHub links the branch to the issue.
+    LinkedOnGitHub,
+    /// The branch of this pull request, which will close the issue.
+    ClosingPullRequest(u64),
+    /// The branch name contains the issue number.
+    MentionsNumber,
+}
+
+impl Reason {
+    /// Whether GitHub says so, rather than the branch name.
+    pub fn is_from_github(self) -> bool {
+        !matches!(self, Reason::MentionsNumber)
+    }
+}
+
+/// A branch that looks like an issue's own, offered before a new branch is
+/// created for the issue.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SuggestedBranch {
+    /// `branch.name` is the local name, also for a branch that is only on a
+    /// remote: worktrunk creates the local branch from the remote one.
+    pub branch: BranchCandidate,
+    /// The remote-tracking branch (`origin/x`) of a branch that is only on a
+    /// remote.
+    pub remote: Option<String>,
+    pub reasons: Vec<Reason>,
+}
+
+/// An entry of the picker shown before a new issue branch is created.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Suggestion {
+    Existing(SuggestedBranch),
+    NewBranch,
+}
+
+impl Suggestion {
+    pub const NEW_BRANCH: &str = "Create a new branch";
+}
+
+impl Entry for Suggestion {
+    fn text(&self) -> &str {
+        match self {
+            Suggestion::Existing(suggested) => &suggested.branch.name,
+            Suggestion::NewBranch => Suggestion::NEW_BRANCH,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PickerAction<T> {
     None,
@@ -194,6 +245,34 @@ pub(crate) mod tests {
                 open: false,
                 issue: None,
             },
+        ]
+    }
+
+    /// What opening issue #3 may offer, in the order the opener sorts it.
+    pub fn suggestions() -> Vec<Suggestion> {
+        let all = branches();
+        vec![
+            Suggestion::Existing(SuggestedBranch {
+                branch: all[1].clone(),
+                remote: None,
+                reasons: vec![Reason::ClosingPullRequest(50), Reason::MentionsNumber],
+            }),
+            Suggestion::Existing(SuggestedBranch {
+                branch: BranchCandidate {
+                    name: "dev-branch".into(),
+                    worktree: None,
+                    open: false,
+                    issue: None,
+                },
+                remote: Some("origin/dev-branch".into()),
+                reasons: vec![Reason::LinkedOnGitHub],
+            }),
+            Suggestion::Existing(SuggestedBranch {
+                branch: all[0].clone(),
+                remote: None,
+                reasons: vec![Reason::MentionsNumber],
+            }),
+            Suggestion::NewBranch,
         ]
     }
 

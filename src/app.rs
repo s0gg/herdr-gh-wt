@@ -490,6 +490,8 @@ pub(crate) mod tests {
             is_draft: false,
             head_ref: (kind == Kind::PullRequest).then(|| format!("branch-{number}")),
             reviewers: vec![],
+            linked_branches: vec![],
+            closing_pull_requests: vec![],
         }
     }
 

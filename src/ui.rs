@@ -13,7 +13,7 @@ use ratatui::widgets::{
 
 use crate::app::{App, Load, Mode, Section, age, age_of, requested_via};
 use crate::github::{Item, Kind};
-use crate::picker::{BaseCandidate, BranchCandidate, Picker};
+use crate::picker::{BaseCandidate, BranchCandidate, Picker, Reason, Suggestion};
 
 const ACCENT: Color = Color::Cyan;
 
@@ -160,20 +160,69 @@ pub fn render_branch_picker(frame: &mut Frame, picker: &Picker<BranchCandidate>,
         .into_iter()
         .map(|c| {
             let mut spans = vec![Span::from(c.name.clone())];
-            if c.worktree.is_some() {
-                spans.push(Span::from("  worktree").fg(Color::Green));
-            }
-            if c.open {
-                spans.push(Span::from("  open").fg(ACCENT));
-            }
-            match c.issue {
-                Some(n) if n == item.number => {
-                    spans.push(Span::from("  linked").fg(Color::Magenta));
-                }
-                Some(n) => spans.push(Span::from(format!("  issue #{n}")).fg(Color::Yellow)),
-                None => {}
-            }
+            spans.extend(branch_tags(c, item));
             ListItem::new(Line::from(spans))
+        })
+        .collect();
+    render_picker(frame, item, &view, &picker.query, entries, picker.cursor());
+}
+
+/// What a branch offered for `item` has: a worktree, open in Herdr, a link
+/// to an issue.
+fn branch_tags(branch: &BranchCandidate, item: &Item) -> Vec<Span<'static>> {
+    let mut spans = Vec::new();
+    if branch.worktree.is_some() {
+        spans.push(Span::from("  worktree").fg(Color::Green));
+    }
+    if branch.open {
+        spans.push(Span::from("  open").fg(ACCENT));
+    }
+    match branch.issue {
+        Some(n) if n == item.number => spans.push(Span::from("  linked").fg(Color::Magenta)),
+        Some(n) => spans.push(Span::from(format!("  issue #{n}")).fg(Color::Yellow)),
+        None => {}
+    }
+    spans
+}
+
+/// The full-screen picker shown before a new branch is created for an issue
+/// whose own branch may already exist.
+pub fn render_suggestion_picker(frame: &mut Frame, picker: &Picker<Suggestion>, item: &Item) {
+    let view = PickerView {
+        badge: "Existing branch?",
+        intro: "This issue may already have a branch. Use one, or create a new branch.",
+        prompt: "branch",
+        list_title: "Choices",
+        empty: "No branch matches.".to_string(),
+        hints: &[("↑↓", "choose"), ("enter", "open it"), ("esc", "cancel")],
+    };
+    let entries = picker
+        .filtered()
+        .into_iter()
+        .map(|suggestion| match suggestion {
+            Suggestion::NewBranch => ListItem::new(Line::from(
+                Span::from(format!("+ {}", Suggestion::NEW_BRANCH))
+                    .fg(ACCENT)
+                    .bold(),
+            )),
+            Suggestion::Existing(s) => {
+                let mut spans = vec![Span::from(s.branch.name.clone())];
+                spans.extend(branch_tags(&s.branch, item));
+                if let Some(remote) = &s.remote {
+                    spans.push(Span::from(format!("  {remote}")).fg(Color::Yellow));
+                }
+                let reasons: Vec<String> = s
+                    .reasons
+                    .iter()
+                    .map(|reason| match reason {
+                        Reason::LinkedOnGitHub => "linked on GitHub".to_string(),
+                        Reason::ClosingPullRequest(n) => format!("closed by PR #{n}"),
+                        Reason::MentionsNumber => format!("#{} in its name", item.number),
+                    })
+                    .collect();
+                spans.push(Span::from(format!("  ({})", reasons.join(", "))).dim());
+                ListItem::new(Line::from(spans))
+            }
         })
         .collect();
     render_picker(frame, item, &view, &picker.query, entries, picker.cursor());
@@ -813,6 +862,48 @@ mod tests {
         let screen = draw_branch_picker(&Picker::new(vec![]), 100, 20);
         assert!(screen.contains("No local branches"), "{screen}");
         draw_branch_picker(&picker, 10, 3);
+    }
+
+    fn draw_suggestion_picker(picker: &Picker<Suggestion>, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let mut item = sample().assigned_issues[0].clone();
+        item.number = 3;
+        terminal
+            .draw(|frame| render_suggestion_picker(frame, picker, &item))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn suggestion_picker_says_why_each_branch_is_offered() {
+        let picker = Picker::new(crate::picker::tests::suggestions());
+        let screen = draw_suggestion_picker(&picker, 120, 20);
+        assert!(screen.contains("Issue #3"), "{screen}");
+        assert!(screen.contains("already"), "intro: {screen}");
+        let closing = line_with(&screen, "search-accents");
+        assert!(
+            closing.contains("PR #50") && closing.contains("#3 in its name"),
+            "{closing}"
+        );
+        assert!(closing.contains("worktree"), "{closing}");
+        let remote = line_with(&screen, "dev-branch");
+        assert!(
+            remote.contains("linked on GitHub") && remote.contains("origin/dev-branch"),
+            "{remote}"
+        );
+        let open = line_with(&screen, "login-timeout");
+        assert!(open.contains("open"), "{open}");
+        assert!(screen.contains("Create a new branch"), "{screen}");
+        assert!(screen.contains("esc"), "hints: {screen}");
+        draw_suggestion_picker(&picker, 10, 3);
     }
 
     #[test]

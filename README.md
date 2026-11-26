@@ -30,12 +30,16 @@ workspace.
    output and any approval prompts show in the pane.
    - Pull requests: `wt switch pr:<number>`. worktrunk checks out the PR's
      branch, including branches from forks.
-   - Issues: the first time, pi suggests a branch name such as
-     `fix-login-timeout`, and the plugin runs `wt switch --create <name>`.
-     The plugin links the branch to the issue in the repository's git config
+   - Issues: the first time, the plugin checks whether a branch already
+     looks like the issue's own, and if one does, asks whether to use it or
+     create a new branch. See
+     [Branches that look like the issue's own](#branches-that-look-like-the-issues-own).
+     For a new branch, pi suggests a name such as `fix-login-timeout`, and the
+     plugin runs `wt switch --create <name>`. Either way, the plugin links the
+     branch to the issue in the repository's git config
      (`branch.<name>.herdr-gh-wt-issue = <number>`). The next time you pick
-     the same issue, it switches to the linked branch instead of creating a
-     new one. Git removes the link when the branch is deleted.
+     the same issue, it switches to the linked branch without asking. Git
+     removes the link when the branch is deleted.
    - Issues opened with <kbd>b</kbd> instead of <kbd>Enter</kbd>: before the
      plugin creates the branch, it runs `git fetch --all` and asks you for the
      base (parent) branch, then runs
@@ -147,12 +151,39 @@ committed branches come first.
 If the issue already has a branch, the plugin opens that branch and says that
 the base was not used.
 
+### Branches that look like the issue's own
+
+You may have started on an issue before opening it from the dashboard, for
+example with `wt switch --create` or `gh issue develop`. So the first time you
+open an issue with <kbd>Enter</kbd>, the plugin looks for branches that seem to
+belong to it:
+
+- Branches that GitHub links to the issue, in the "Development" section of the
+  issue.
+- Branches of open pull requests that will close the issue.
+- Local branches with the issue number as a part of their name, split at `-`,
+  `_` and `/`: `42-login`, `fix/issue-42` and `gh42` for issue 42, but not
+  `142-login` or `v42`.
+
+Branches linked to another issue are left out. When GitHub knows a branch that
+the clone doesn't have, the plugin runs `git fetch --all` first. A branch that
+is only on a remote can be offered, and worktrunk creates the local branch from
+it.
+
+If any branch qualifies, the plugin lists them, with GitHub's first and the
+reason for each, followed by **Create a new branch**. Pick a branch to link it
+to the issue and open it, or pick **Create a new branch** to go on as usual.
+<kbd>Esc</kbd> cancels. When nothing qualifies, the plugin creates the new
+branch without asking.
+
+<kbd>b</kbd> always creates a new branch, so it doesn't look for these
+branches.
+
 ### Linking an existing branch
 
-The plugin only knows the branches it created for an issue. If you already
-started on an issue in a branch of your own, for example with `wt switch
---create`, select the issue and press <kbd>l</kbd> to link that branch instead
-of having the plugin create a new one.
+To link any local branch to an issue, select the issue and press
+<kbd>l</kbd>. Use it for a branch the plugin doesn't find by itself, or to
+fix a wrong link.
 
 The plugin lists the repository's local branches: branches with a worktree
 first, then the others, each group with the most recently committed first.
@@ -165,8 +196,7 @@ Herdr, and which issue it is linked to, if any.
 
 An issue has one linked branch, and a branch belongs to one issue: linking
 replaces the issue's previous link, and a branch linked to another issue moves
-to this one. Use <kbd>l</kbd> again to fix a wrong link. From then on,
-<kbd>Enter</kbd> opens the linked branch.
+to this one. From then on, <kbd>Enter</kbd> opens the linked branch.
 
 ## Configuration
 
@@ -261,10 +291,12 @@ scripts/e2e-sandbox.sh down    # stops the session and deletes the sandbox
 ```
 
 The sandbox serves three assigned issues of a local `acme/app` repository.
-Its origin has a remote-only `epic/demo` branch to pick as a base, and the
-clone has a `login-timeout` worktree made outside the plugin, to link an issue
-to. Pull requests are not part of it, because `wt switch pr:N` needs the real
-GitHub.
+Its origin has a remote-only `epic/demo` branch to pick as a base. Branches
+made outside the plugin look like the issues' own: a `login-timeout` worktree
+to link issue 1 to with <kbd>l</kbd>, a `2-dark-mode` branch named after issue
+2, and a `search-accents` branch that GitHub links to issue 3, pushed after
+the clone so that the plugin fetches it. Pull requests are not part of the
+sandbox, because `wt switch pr:N` needs the real GitHub.
 
 You can also run the dashboard outside a plugin pane with
 `cargo run -- dashboard`, from inside Herdr.

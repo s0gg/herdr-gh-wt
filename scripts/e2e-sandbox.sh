@@ -11,8 +11,11 @@
 # - a stub `gh` that serves a fixed set of assigned issues for acme/app, so
 #   no GitHub account or network is involved;
 # - a ghq root holding acme/app, cloned from a local bare "origin" that also
-#   has a remote-only branch (epic/demo) to pick as a base, and with a
-#   worktree made outside the plugin (login-timeout) to link an issue to;
+#   has a remote-only branch (epic/demo) to pick as a base. Branches made
+#   outside the plugin look like the issues' own: a worktree (login-timeout)
+#   to link issue 1 to with l, a branch named after issue 2 (2-dark-mode),
+#   and a branch GitHub links to issue 3 (search-accents) that is pushed after
+#   the clone, so the plugin has to fetch it;
 # - a config file with a short pi timeout. Set HERDR_GH_WT_PI_MODEL to try
 #   real names from pi; without a usable model, pi gives up after 5 seconds
 #   and the fallback names are used.
@@ -53,20 +56,30 @@ write_fixtures() {
   "${git[@]}" -C "$dir/seed" switch --quiet -c epic/demo
   "${git[@]}" -C "$dir/seed" commit --quiet --allow-empty -m "Epic work"
   "${git[@]}" -C "$dir/seed" push --quiet origin epic/demo
-  rm -rf "$dir/seed"
 
   mkdir -p "$dir/ghq/github.com/acme" "$dir/bin"
-  "${git[@]}" clone --quiet "$dir/origin.git" "$dir/ghq/github.com/acme/app"
-  "${git[@]}" -C "$dir/ghq/github.com/acme/app" worktree add --quiet \
-    -b login-timeout "$dir/ghq/github.com/acme/app.login-timeout"
+  local app="$dir/ghq/github.com/acme/app"
+  "${git[@]}" clone --quiet "$dir/origin.git" "$app"
+  "${git[@]}" -C "$app" worktree add --quiet -b login-timeout "$app.login-timeout"
+  "${git[@]}" -C "$app" branch 2-dark-mode
 
-  local issues='' n title
+  "${git[@]}" -C "$dir/seed" switch --quiet -c search-accents main
+  "${git[@]}" -C "$dir/seed" commit --quiet --allow-empty -m "Accent folding"
+  "${git[@]}" -C "$dir/seed" push --quiet origin search-accents
+  rm -rf "$dir/seed"
+
+  local issues='' n title linked
   for n in 1 2 3; do
     title=$(sed -n "${n}p" <<<$'Login times out\nAdd dark mode\nSearch ignores accents')
-    issues+=${issues:+,}$(jq -cn --argjson n "$n" --arg title "$title" '{
+    linked=$([[ $n == 3 ]] && echo search-accents || true)
+    issues+=${issues:+,}$(jq -cn --argjson n "$n" --arg title "$title" --arg linked "$linked" '{
       number: $n, title: $title, url: "https://github.com/acme/app/issues/\($n)",
       updatedAt: "2026-01-01T00:00:00Z", bodyText: "", author: {login: "e2e"},
-      repository: {nameWithOwner: "acme/app"}, labels: {nodes: []}
+      repository: {nameWithOwner: "acme/app"}, labels: {nodes: []},
+      linkedBranches: {nodes: [
+        $linked | select(. != "") | {ref: {name: ., repository: {nameWithOwner: "acme/app"}}}
+      ]},
+      closedByPullRequestsReferences: {nodes: []}
     }')
   done
   printf '{"data":{"viewer":{"login":"e2e"},"reviewRequests":{"nodes":[]},"assignedIssues":{"nodes":[%s]}}}\n' \

@@ -11,8 +11,10 @@ use herdr_gh_wt::app::{Action, App, Load};
 use herdr_gh_wt::config::Config;
 use herdr_gh_wt::github::{self, Dashboard, Item};
 use herdr_gh_wt::herdr::{Herdr, PaneOpen};
-use herdr_gh_wt::open::{IssueBranch, Opener, Outcome};
-use herdr_gh_wt::picker::{BaseCandidate, BranchCandidate, Entry, Picker, PickerAction};
+use herdr_gh_wt::open::{BranchChoice, IssueBranch, Opener, Outcome};
+use herdr_gh_wt::picker::{
+    BaseCandidate, BranchCandidate, Entry, Picker, PickerAction, SuggestedBranch, Suggestion,
+};
 use herdr_gh_wt::runner::{Runner, SystemRunner};
 use herdr_gh_wt::ui;
 
@@ -103,7 +105,7 @@ fn dashboard() -> Result<()> {
             }
             Ok(Some(Action::Browse(item))) => browse(&runner, &item, &mut app),
             Ok(Some(Action::Open(item))) => {
-                if open_outside_tui(&opener, &item, Ask::Nothing, &mut app, &mut terminal) {
+                if open_outside_tui(&opener, &item, Ask::Suggested, &mut app, &mut terminal) {
                     return Ok(());
                 }
             }
@@ -157,7 +159,9 @@ fn browse(runner: &Arc<dyn Runner + Send + Sync>, item: &Item, app: &mut App) {
 /// What the user is asked before an item opens.
 #[derive(Clone, Copy)]
 enum Ask {
-    Nothing,
+    /// Only whether to use a branch that looks like the issue's own, when
+    /// there is one.
+    Suggested,
     /// The base branch of a new issue branch.
     Base,
     /// The existing branch to link an issue to.
@@ -209,8 +213,9 @@ fn open(opener: &Opener, item: &Item, ask: Ask) -> AfterOpen {
     };
     let mut base = |candidates: &[BaseCandidate]| pick_base(item, candidates);
     let mut branch = |candidates: &[BranchCandidate]| pick_branch(item, candidates);
+    let mut suggested = |suggestions: &[SuggestedBranch]| pick_suggested(item, suggestions);
     let how = match ask {
-        Ask::Nothing => IssueBranch::Default,
+        Ask::Suggested => IssueBranch::Suggest(&mut suggested),
         Ask::Base => IssueBranch::FromBase(&mut base),
         Ask::Branch => IssueBranch::Link(&mut branch),
     };
@@ -239,13 +244,12 @@ fn open(opener: &Opener, item: &Item, ask: Ask) -> AfterOpen {
     }
 }
 
-/// Run `picker` full screen until the user picks an entry, which `value`
-/// turns into the answer, or typed text, or cancels (`None`).
+/// Run `picker` full screen until the user picks an entry or typed text,
+/// or cancels.
 fn run_picker<T: Entry + Clone>(
     mut picker: Picker<T>,
     render: impl Fn(&mut Frame, &Picker<T>),
-    value: impl Fn(T) -> String,
-) -> Result<Option<String>> {
+) -> Result<PickerAction<T>> {
     let mut terminal = ratatui::init();
     let result = (|| loop {
         terminal.draw(|frame| render(frame, &picker))?;
@@ -253,10 +257,8 @@ fn run_picker<T: Entry + Clone>(
             && key.kind == KeyEventKind::Press
         {
             match picker.handle_key(key) {
-                PickerAction::Pick(entry) => return Ok(Some(value(entry))),
-                PickerAction::Typed(text) => return Ok(Some(text)),
-                PickerAction::Cancel => return Ok(None),
                 PickerAction::None => {}
+                done => return Ok(done),
             }
         }
     })();
@@ -267,23 +269,51 @@ fn run_picker<T: Entry + Clone>(
 /// Let the user pick the base branch of a new issue branch; `None` cancels.
 fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>> {
     let picker = Picker::new(candidates.to_vec()).accepting_typed();
-    let result = run_picker(
-        picker,
-        |frame, picker| ui::render_base_picker(frame, picker, item),
-        |candidate| candidate.name,
-    );
-    if let Ok(Some(base)) = &result {
+    let base = match run_picker(picker, |frame, picker| {
+        ui::render_base_picker(frame, picker, item);
+    })? {
+        PickerAction::Pick(candidate) => Some(candidate.name),
+        PickerAction::Typed(base) => Some(base),
+        PickerAction::Cancel | PickerAction::None => None,
+    };
+    if let Some(base) = &base {
         println!("\x1b[36m›\x1b[0m Base branch: {base}");
     }
-    result
+    Ok(base)
 }
 
 /// Let the user pick the branch to link an issue to; `None` cancels.
 fn pick_branch(item: &Item, candidates: &[BranchCandidate]) -> Result<Option<String>> {
-    run_picker(
-        Picker::new(candidates.to_vec()),
-        |frame, picker| ui::render_branch_picker(frame, picker, item),
-        |candidate| candidate.name,
+    let picker = Picker::new(candidates.to_vec());
+    Ok(
+        match run_picker(picker, |frame, picker| {
+            ui::render_branch_picker(frame, picker, item);
+        })? {
+            PickerAction::Pick(candidate) => Some(candidate.name),
+            _ => None,
+        },
+    )
+}
+
+/// Let the user choose between the branches that look like the issue's own
+/// and a new branch; `None` cancels.
+fn pick_suggested(item: &Item, suggestions: &[SuggestedBranch]) -> Result<Option<BranchChoice>> {
+    let entries = suggestions
+        .iter()
+        .cloned()
+        .map(Suggestion::Existing)
+        .chain([Suggestion::NewBranch])
+        .collect();
+    Ok(
+        match run_picker(Picker::new(entries), |frame, picker| {
+            ui::render_suggestion_picker(frame, picker, item);
+        })? {
+            PickerAction::Pick(Suggestion::Existing(s)) => {
+                Some(BranchChoice::Existing(s.branch.name))
+            }
+            PickerAction::Pick(Suggestion::NewBranch) => Some(BranchChoice::New),
+            _ => None,
+        },
     )
 }
 

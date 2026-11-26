@@ -25,7 +25,7 @@ use crate::github::{Item, Kind};
 use crate::herdr::{Herdr, WorktreeList};
 use crate::naming::unique_branch;
 use crate::pi;
-use crate::picker::{BaseCandidate, BranchCandidate};
+use crate::picker::{BaseCandidate, BranchCandidate, Reason, SuggestedBranch};
 use crate::runner::{Cmd, Io, Runner};
 
 /// Git config variable (`branch.<name>.herdr-gh-wt-issue`) that links a
@@ -50,12 +50,30 @@ pub type ChooseBase<'a> = &'a mut dyn FnMut(&[BaseCandidate]) -> Result<Option<S
 /// Asks the user which local branch to link to an issue; `None` cancels.
 pub type ChooseBranch<'a> = &'a mut dyn FnMut(&[BranchCandidate]) -> Result<Option<String>>;
 
+/// What the user wants for an issue that has no linked branch yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BranchChoice {
+    /// A new branch.
+    New,
+    /// This existing branch, linked to the issue.
+    Existing(String),
+}
+
+/// Asks the user whether to create a new branch for an issue or to use one
+/// of the branches that look like its own; `None` cancels.
+pub type ChooseSuggested<'a> =
+    &'a mut dyn FnMut(&[SuggestedBranch]) -> Result<Option<BranchChoice>>;
+
 /// How an issue's branch is settled. Pull requests always use their own
 /// branch.
 pub enum IssueBranch<'a> {
     /// The issue's linked branch; without one, a new branch from the
     /// repository's default branch.
     Default,
+    /// Like `Default`, but when branches look like the issue's own (GitHub
+    /// links them to it, or their name has its number), the function decides
+    /// between them and a new branch first.
+    Suggest(ChooseSuggested<'a>),
     /// Like `Default`, but a new branch starts from a base that the function
     /// picks.
     FromBase(ChooseBase<'a>),
@@ -108,6 +126,19 @@ impl Opener {
                 self.link_issue_branch(&root, &branch, item.number, log)?;
                 Some(branch)
             }
+            (Kind::Issue, IssueBranch::Suggest(choose)) => {
+                match self.recorded_issue_branch(&root, item.number)? {
+                    Some(branch) => Some(branch),
+                    None => match self.ask_suggested(&root, &list, item, choose, log)? {
+                        None => return Ok(Outcome::Cancelled),
+                        Some(BranchChoice::New) => None,
+                        Some(BranchChoice::Existing(branch)) => {
+                            self.link_issue_branch(&root, &branch, item.number, log)?;
+                            Some(branch)
+                        }
+                    },
+                }
+            }
             (Kind::Issue, _) => self.recorded_issue_branch(&root, item.number)?,
         };
         if let (Kind::Issue, Some(branch), IssueBranch::FromBase(_)) =
@@ -135,7 +166,7 @@ impl Opener {
                         Some(base) => Some(base),
                         None => return Ok(Outcome::Cancelled),
                     },
-                    IssueBranch::Default | IssueBranch::Link(_) => None,
+                    IssueBranch::Default | IssueBranch::Suggest(_) | IssueBranch::Link(_) => None,
                 };
                 let mut target = vec![
                     "--create".to_string(),
@@ -378,24 +409,29 @@ impl Opener {
         log: &mut dyn FnMut(&str),
     ) -> Result<Option<String>> {
         log("Fetching remote branches...");
+        self.fetch_all(root, log);
+        let candidates = self.base_candidates(root)?;
+        choose(&candidates)
+    }
+
+    /// `git fetch --all`, where it can ask for credentials. A failure is
+    /// reported and otherwise ignored: the branches known locally remain.
+    fn fetch_all(&self, root: &Path, log: &mut dyn FnMut(&str)) {
         let fetched = self
             .runner
             .run(&git(root, &["fetch", "--all", "--quiet"]).io(Io::Inherit));
         match fetched {
             Ok(out) if out.success => {}
-            Ok(_) => log("git fetch failed; offering the branches known locally"),
+            Ok(_) => log("git fetch failed; using the branches known locally"),
             Err(err) => log(&format!(
-                "git fetch failed ({err:#}); offering the branches known locally"
+                "git fetch failed ({err:#}); using the branches known locally"
             )),
         }
-        let candidates = self.base_candidates(root)?;
-        choose(&candidates)
     }
 
-    /// Local branches, then remote-tracking branches without a local
-    /// counterpart, most recently committed first, with the default branch
-    /// moved to the top.
-    fn base_candidates(&self, root: &Path) -> Result<Vec<BaseCandidate>> {
+    /// Local branches and remote-tracking branches (`origin/x`, leaving out
+    /// the remotes' `HEAD`), each most recently committed first.
+    fn branch_refs(&self, root: &Path) -> Result<(Vec<String>, Vec<String>)> {
         let refs = self.runner.stdout(&git(
             root,
             &[
@@ -410,17 +446,145 @@ impl Opener {
         let mut remote = Vec::new();
         for reference in refs.lines().map(str::trim) {
             if let Some(name) = reference.strip_prefix("refs/heads/") {
-                local.push(name);
+                local.push(name.to_string());
             } else if let Some(name) = reference.strip_prefix("refs/remotes/")
                 && !name.ends_with("/HEAD")
             {
-                remote.push(name);
+                remote.push(name.to_string());
             }
         }
+        Ok((local, remote))
+    }
+
+    /// When branches look like issue `item`'s own, let `choose` decide
+    /// between them and a new branch; a new branch when none do.
+    fn ask_suggested(
+        &self,
+        root: &Path,
+        list: &WorktreeList,
+        item: &Item,
+        choose: ChooseSuggested,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Option<BranchChoice>> {
+        let suggestions = self.suggested_branches(root, list, item, log)?;
+        if suggestions.is_empty() {
+            return Ok(Some(BranchChoice::New));
+        }
+        choose(&suggestions)
+    }
+
+    /// Branches that look like issue `item`'s own and belong to no other
+    /// issue: those GitHub links to it (fetched first when this clone lacks
+    /// them), then those whose name has its number; each group most recently
+    /// committed first. Branches only on a remote are offered when GitHub
+    /// links them.
+    fn suggested_branches(
+        &self,
+        root: &Path,
+        list: &WorktreeList,
+        item: &Item,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Vec<SuggestedBranch>> {
+        let reasons = |name: &str, local: bool| {
+            let mut reasons = Vec::new();
+            if item.linked_branches.iter().any(|b| b == name) {
+                reasons.push(Reason::LinkedOnGitHub);
+            }
+            reasons.extend(
+                item.closing_pull_requests
+                    .iter()
+                    .filter(|pr| pr.head_ref == name)
+                    .map(|pr| Reason::ClosingPullRequest(pr.number)),
+            );
+            if local && mentions_number(name, item.number) {
+                reasons.push(Reason::MentionsNumber);
+            }
+            reasons
+        };
+        let from_github: Vec<&str> = item
+            .linked_branches
+            .iter()
+            .map(String::as_str)
+            .chain(
+                item.closing_pull_requests
+                    .iter()
+                    .map(|pr| pr.head_ref.as_str()),
+            )
+            .collect();
+        let knows = |(local, remote): &(Vec<String>, Vec<String>), name: &str| {
+            local.iter().any(|b| b == name)
+                || remote
+                    .iter()
+                    .any(|r| r.split_once('/').is_some_and(|(_, b)| b == name))
+        };
+
+        let mut refs = self.branch_refs(root)?;
+        if from_github.iter().any(|name| !knows(&refs, name)) {
+            log("Fetching the branches GitHub links to the issue...");
+            self.fetch_all(root, log);
+            refs = self.branch_refs(root)?;
+        }
+        let (local, remote) = refs;
+        let records = self.issue_records(root)?;
+        let linked_to = |name: &str| {
+            records
+                .iter()
+                .find(|(branch, _)| branch == name)
+                .map(|&(_, n)| n)
+        };
+
+        let mut suggestions: Vec<SuggestedBranch> = local
+            .iter()
+            .map(|name| {
+                let worktree = list
+                    .worktrees
+                    .iter()
+                    .find(|w| w.branch.as_deref() == Some(name));
+                SuggestedBranch {
+                    branch: BranchCandidate {
+                        name: name.clone(),
+                        worktree: worktree.map(|w| w.path.clone()),
+                        open: worktree.is_some_and(|w| w.open_workspace_id.is_some()),
+                        issue: linked_to(name),
+                    },
+                    remote: None,
+                    reasons: reasons(name, true),
+                }
+            })
+            .collect();
+        for remote_name in &remote {
+            let Some((_, name)) = remote_name.split_once('/') else {
+                continue;
+            };
+            if suggestions.iter().any(|s| s.branch.name == name) {
+                continue;
+            }
+            suggestions.push(SuggestedBranch {
+                branch: BranchCandidate {
+                    name: name.to_string(),
+                    worktree: None,
+                    open: false,
+                    issue: linked_to(name),
+                },
+                remote: Some(remote_name.clone()),
+                reasons: reasons(name, false),
+            });
+        }
+        suggestions
+            .retain(|s| !s.reasons.is_empty() && s.branch.issue.is_none_or(|n| n == item.number));
+        suggestions.sort_by_key(|s| !s.reasons.iter().any(|r| r.is_from_github()));
+        Ok(suggestions)
+    }
+
+    /// Local branches, then remote-tracking branches without a local
+    /// counterpart, most recently committed first, with the default branch
+    /// moved to the top.
+    fn base_candidates(&self, root: &Path) -> Result<Vec<BaseCandidate>> {
+        let (local, mut remote) = self.branch_refs(root)?;
         remote.retain(|name| {
             !name
                 .split_once('/')
-                .is_some_and(|(_, branch)| local.contains(&branch))
+                .is_some_and(|(_, branch)| local.iter().any(|l| l == branch))
         });
 
         let candidate = |name: &str, remote| BaseCandidate {
@@ -501,6 +665,19 @@ impl Opener {
 /// `git ARGS...` run inside `root`.
 fn git(root: &Path, args: &[&str]) -> Cmd {
     Cmd::new("git", args.iter().copied()).cwd(root)
+}
+
+/// Whether issue `number` is one of the parts of a branch name, split at
+/// `-`, `_` and `/`: the whole part, or after `issue` or `gh`, in any case.
+fn mentions_number(branch: &str, number: u64) -> bool {
+    let number = number.to_string();
+    branch.split(['-', '_', '/']).any(|part| {
+        let part = part.to_ascii_lowercase();
+        part == number
+            || ["issue", "gh"]
+                .iter()
+                .any(|prefix| part.strip_prefix(prefix) == Some(number.as_str()))
+    })
 }
 
 /// The git config key that links `branch` to an issue.
@@ -588,6 +765,8 @@ mod tests {
         /// `git symbolic-ref refs/remotes/origin/HEAD`
         origin_head: Option<String>,
         fetch_fails: bool,
+        /// refs that `git fetch` brings in
+        fetched_refs: Vec<String>,
     }
 
     impl Default for World {
@@ -613,6 +792,7 @@ mod tests {
                 .to_vec(),
                 origin_head: Some("origin/main".into()),
                 fetch_fails: false,
+                fetched_refs: vec![],
             }
         }
     }
@@ -721,6 +901,8 @@ mod tests {
                 if w.fetch_fails {
                     Output::failed("could not read from remote")
                 } else {
+                    let fetched = std::mem::take(&mut w.fetched_refs);
+                    w.refs.extend(fetched);
                     Output::ok("")
                 }
             }
@@ -838,6 +1020,8 @@ mod tests {
             is_draft: false,
             head_ref: Some("feat/x".into()),
             reviewers: vec![],
+            linked_branches: vec![],
+            closing_pull_requests: vec![],
         }
     }
 
@@ -1530,6 +1714,288 @@ mod tests {
         assert!(ran(&r, "wt switch pr:7 "), "{:#?}", r.lines);
         assert_eq!(r.world.issue_map, Vec::new());
     }
+
+    /// Branches that look like issue #42's: one with its number, one of a
+    /// pull request that will close it, and one only on the remote that
+    /// GitHub links to it.
+    fn world_with_lookalikes() -> World {
+        let mut world = World::default();
+        world.branches.extend([
+            "unrelated".into(),
+            "issue-42-login".into(),
+            "login-redesign".into(),
+        ]);
+        world.worktrees.push((
+            "issue-42-login".into(),
+            format!("{ROOT}.issue-42-login"),
+            None,
+        ));
+        world.refs = [
+            "refs/heads/unrelated",
+            "refs/heads/issue-42-login",
+            "refs/heads/login-redesign",
+            "refs/heads/main",
+            "refs/remotes/origin/HEAD",
+            "refs/remotes/origin/gh-linked",
+            "refs/remotes/origin/login-redesign",
+            // Someone else's branch: only GitHub's links count on a remote.
+            "refs/remotes/origin/42-other-approach",
+            "refs/remotes/origin/main",
+        ]
+        .map(String::from)
+        .to_vec();
+        world
+    }
+
+    fn issue_with_hints() -> Item {
+        Item {
+            linked_branches: vec!["gh-linked".into()],
+            closing_pull_requests: vec![crate::github::PullRef {
+                number: 50,
+                head_ref: "login-redesign".into(),
+            }],
+            ..issue()
+        }
+    }
+
+    fn suggested(
+        branch: BranchCandidate,
+        remote: Option<&str>,
+        reasons: &[Reason],
+    ) -> SuggestedBranch {
+        SuggestedBranch {
+            branch,
+            remote: remote.map(String::from),
+            reasons: reasons.to_vec(),
+        }
+    }
+
+    #[test]
+    fn suggests_branches_that_look_like_the_issue_before_creating_one() {
+        let mut offered = Vec::new();
+        let mut choose = |suggestions: &[SuggestedBranch]| {
+            offered = suggestions.to_vec();
+            Ok(Some(BranchChoice::Existing("login-redesign".into())))
+        };
+        let r = run_with(
+            world_with_lookalikes(),
+            &issue_with_hints(),
+            IssueBranch::Suggest(&mut choose),
+        );
+        assert_eq!(
+            offered,
+            vec![
+                suggested(
+                    branch("login-redesign", None, false, None),
+                    None,
+                    &[Reason::ClosingPullRequest(50)]
+                ),
+                suggested(
+                    branch("gh-linked", None, false, None),
+                    Some("origin/gh-linked"),
+                    &[Reason::LinkedOnGitHub]
+                ),
+                suggested(
+                    branch(
+                        "issue-42-login",
+                        Some(&format!("{ROOT}.issue-42-login")),
+                        false,
+                        None
+                    ),
+                    None,
+                    &[Reason::MentionsNumber]
+                ),
+            ],
+            "GitHub's links first, newest first; remote copies of local branches are left out"
+        );
+        assert!(
+            ran(&r, "wt switch login-redesign --no-cd"),
+            "{:#?}",
+            r.lines
+        );
+        assert_eq!(r.world.issue_map, vec![("login-redesign".to_string(), 42)]);
+        assert!(
+            !ran(&r, "git fetch"),
+            "every branch GitHub knows is here: {:#?}",
+            r.lines
+        );
+        assert!(
+            matches!(r.outcome, Ok(Outcome::Opened { .. })),
+            "{:?}",
+            r.outcome
+        );
+    }
+
+    #[test]
+    fn a_suggested_remote_branch_is_checked_out_by_worktrunk() {
+        let r = run_with(
+            world_with_lookalikes(),
+            &issue_with_hints(),
+            IssueBranch::Suggest(&mut |_: &[SuggestedBranch]| {
+                Ok(Some(BranchChoice::Existing("gh-linked".into())))
+            }),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(ran(&r, "wt switch gh-linked --no-cd"), "{:#?}", r.lines);
+        assert_eq!(r.world.issue_map, vec![("gh-linked".to_string(), 42)]);
+    }
+
+    #[test]
+    fn a_new_branch_can_be_chosen_over_the_suggestions() {
+        let r = run_with(
+            world_with_lookalikes(),
+            &issue_with_hints(),
+            IssueBranch::Suggest(&mut |_: &[SuggestedBranch]| Ok(Some(BranchChoice::New))),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(
+            ran(&r, "wt switch --create fix-login-timeout "),
+            "{:#?}",
+            r.lines
+        );
+        assert_eq!(
+            r.world.issue_map,
+            vec![("fix-login-timeout".to_string(), 42)]
+        );
+    }
+
+    #[test]
+    fn cancelling_the_suggestions_opens_nothing() {
+        let r = run_with(
+            world_with_lookalikes(),
+            &issue_with_hints(),
+            IssueBranch::Suggest(&mut |_: &[SuggestedBranch]| Ok(None)),
+        );
+        assert_eq!(r.outcome.as_ref().unwrap(), &Outcome::Cancelled);
+        assert!(!ran(&r, "wt "), "{:#?}", r.lines);
+        assert!(!ran(&r, "pi "), "{:#?}", r.lines);
+        assert_eq!(r.world.issue_map, Vec::new());
+    }
+
+    fn never_asked(_: &[SuggestedBranch]) -> anyhow::Result<Option<BranchChoice>> {
+        panic!("not asked")
+    }
+
+    #[test]
+    fn nothing_is_asked_without_lookalikes() {
+        let r = run_with(
+            World::default(),
+            &issue(),
+            IssueBranch::Suggest(&mut never_asked),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(
+            ran(&r, "wt switch --create fix-login-timeout "),
+            "{:#?}",
+            r.lines
+        );
+    }
+
+    #[test]
+    fn nothing_is_asked_for_a_linked_issue_or_a_pull_request() {
+        let mut world = world_with_lookalikes();
+        world.issue_map.push(("unrelated".into(), 42));
+        let r = run_with(
+            world,
+            &issue_with_hints(),
+            IssueBranch::Suggest(&mut never_asked),
+        );
+        assert!(ran(&r, "wt switch unrelated --no-cd"), "{:#?}", r.lines);
+
+        let r = run_with(
+            world_with_lookalikes(),
+            &pr(),
+            IssueBranch::Suggest(&mut never_asked),
+        );
+        assert!(ran(&r, "wt switch pr:7 "), "{:#?}", r.lines);
+    }
+
+    #[test]
+    fn branches_of_other_issues_are_not_suggested() {
+        let mut world = world_with_lookalikes();
+        world.issue_map.push(("issue-42-login".into(), 7));
+        let r = run_with(world, &issue(), IssueBranch::Suggest(&mut never_asked));
+        assert!(
+            ran(&r, "wt switch --create fix-login-timeout "),
+            "{:#?}",
+            r.lines
+        );
+    }
+
+    #[test]
+    fn fetches_a_branch_github_links_but_the_clone_lacks() {
+        let world = World {
+            fetched_refs: vec!["refs/remotes/origin/gh-new".into()],
+            ..World::default()
+        };
+        let item = Item {
+            linked_branches: vec!["gh-new".into()],
+            ..issue()
+        };
+        let mut offered = Vec::new();
+        let mut choose = |suggestions: &[SuggestedBranch]| {
+            offered = suggestions.to_vec();
+            Ok(None)
+        };
+        let r = run_with(world, &item, IssueBranch::Suggest(&mut choose));
+        assert!(ran(&r, "git fetch --all --quiet"), "{:#?}", r.lines);
+        assert_eq!(
+            offered,
+            vec![suggested(
+                branch("gh-new", None, false, None),
+                Some("origin/gh-new"),
+                &[Reason::LinkedOnGitHub]
+            )]
+        );
+    }
+
+    #[test]
+    fn a_branch_github_links_that_cannot_be_fetched_is_skipped() {
+        let item = Item {
+            linked_branches: vec!["gh-deleted".into()],
+            ..issue()
+        };
+        let r = run_with(
+            World::default(),
+            &item,
+            IssueBranch::Suggest(&mut never_asked),
+        );
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(
+            ran(&r, "wt switch --create fix-login-timeout "),
+            "{:#?}",
+            r.lines
+        );
+    }
+
+    #[test]
+    fn issue_numbers_are_matched_as_whole_parts_of_a_branch_name() {
+        for name in [
+            "42",
+            "42-fix-login",
+            "fix-login-42",
+            "issue-42",
+            "feature/42-login",
+            "fix_42",
+            "GH-42",
+            "issue42",
+            "Issue42-login",
+            "gh42",
+        ] {
+            assert!(mentions_number(name, 42), "{name}");
+        }
+        for name in [
+            "142-fix",
+            "420",
+            "fix-4-2",
+            "release-4.2",
+            "v42",
+            "pr42",
+            "main",
+        ] {
+            assert!(!mentions_number(name, 42), "{name}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1538,6 +2004,31 @@ mod properties {
     use proptest::prelude::*;
 
     proptest! {
+        #[test]
+        fn issue_numbers_match_as_parts_but_not_inside_other_numbers(
+            number in 1u64..1_000_000,
+            digit in 0u8..10,
+            before in "[a-z]{0,8}",
+            after in "[a-z]{0,8}",
+            separator in prop::sample::select(vec!["-", "_", "/"]),
+        ) {
+            let part = |text: &str| -> String {
+                [before.as_str(), text, after.as_str()]
+                    .into_iter()
+                    .filter(|p| !p.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(separator)
+            };
+            let alone = part(&number.to_string());
+            let prefixed = part(&format!("issue{number}"));
+            let longer = part(&format!("{number}{digit}"));
+            let led = part(&format!("{digit}{number}"));
+            prop_assert!(mentions_number(&alone, number), "{}", alone);
+            prop_assert!(mentions_number(&prefixed, number), "{}", prefixed);
+            prop_assert!(!mentions_number(&longer, number), "{}", longer);
+            prop_assert!(!mentions_number(&led, number), "{}", led);
+        }
+
         #[test]
         fn worktrunk_output_never_panics(stdout in any::<String>()) {
             let _ = parse_switched(&stdout);

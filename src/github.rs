@@ -37,6 +37,18 @@ pub struct Item {
     pub head_ref: Option<String>,
     /// Pending review requests of a pull request.
     pub reviewers: Vec<Reviewer>,
+    /// Branches of the same repository linked to an issue on GitHub (the
+    /// "Development" section of the issue).
+    pub linked_branches: Vec<String>,
+    /// Open pull requests from the same repository that will close an issue.
+    pub closing_pull_requests: Vec<PullRef>,
+}
+
+/// A pull request and its head branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRef {
+    pub number: u64,
+    pub head_ref: String,
 }
 
 impl Item {
@@ -98,6 +110,12 @@ query($prQuery: String!, $issueQuery: String!, $limit: Int!) {
         author { login }
         repository { nameWithOwner }
         labels(first: 20) { nodes { name } }
+        linkedBranches(first: 10) {
+          nodes { ref { name repository { nameWithOwner } } }
+        }
+        closedByPullRequestsReferences(first: 10, includeClosedPrs: false) {
+          nodes { number headRefName headRepository { nameWithOwner } }
+        }
       }
     }
   }
@@ -217,6 +235,26 @@ struct RepositoryRef {
 }
 
 #[derive(Deserialize)]
+struct LinkedBranch {
+    #[serde(rename = "ref")]
+    reference: Option<BranchRef>,
+}
+
+#[derive(Deserialize)]
+struct BranchRef {
+    name: String,
+    repository: RepositoryRef,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClosingPullRequest {
+    number: u64,
+    head_ref_name: String,
+    head_repository: Option<RepositoryRef>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ReviewRequest {
     requested_reviewer: Option<RequestedReviewer>,
@@ -253,15 +291,42 @@ struct Node {
     repository: Option<RepositoryRef>,
     labels: Option<Connection<Named>>,
     review_requests: Option<Connection<ReviewRequest>>,
+    linked_branches: Option<Connection<LinkedBranch>>,
+    closed_by_pull_requests_references: Option<Connection<ClosingPullRequest>>,
 }
 
 impl Node {
     fn into_item(self, kind: Kind) -> Option<Item> {
         let url = self.url?;
+        let repo = self.repository?.name_with_owner;
+        let linked_branches = self
+            .linked_branches
+            .map(|c| c.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|node| node.reference)
+            .filter(|r| r.repository.name_with_owner == repo)
+            .map(|r| r.name)
+            .collect();
+        let closing_pull_requests = self
+            .closed_by_pull_requests_references
+            .map(|c| c.nodes)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|pr| {
+                pr.head_repository
+                    .as_ref()
+                    .is_some_and(|r| r.name_with_owner == repo)
+            })
+            .map(|pr| PullRef {
+                number: pr.number,
+                head_ref: pr.head_ref_name,
+            })
+            .collect();
         Some(Item {
             kind,
             host: host_of(&url),
-            repo: self.repository?.name_with_owner,
+            repo,
             number: self.number?,
             title: self.title.unwrap_or_default(),
             url,
@@ -292,6 +357,8 @@ impl Node {
                         .collect()
                 })
                 .unwrap_or_default(),
+            linked_branches,
+            closing_pull_requests,
         })
     }
 }
@@ -336,7 +403,17 @@ mod tests {
             "updatedAt": "2026-11-19T09:00:00Z", "bodyText": "Body",
             "author": { "login": "bob" },
             "repository": { "nameWithOwner": "acme/app" },
-            "labels": { "nodes": [ { "name": "enhancement" }, { "name": "bug" } ] }
+            "labels": { "nodes": [ { "name": "enhancement" }, { "name": "bug" } ] },
+            "linkedBranches": { "nodes": [
+              { "ref": { "name": "202-login-screen", "repository": { "nameWithOwner": "acme/app" } } },
+              { "ref": { "name": "elsewhere", "repository": { "nameWithOwner": "someone/app" } } },
+              { "ref": null }
+            ] },
+            "closedByPullRequestsReferences": { "nodes": [
+              { "number": 303, "headRefName": "login-redesign", "headRepository": { "nameWithOwner": "acme/app" } },
+              { "number": 304, "headRefName": "patch-1", "headRepository": { "nameWithOwner": "fork/app" } },
+              { "number": 305, "headRefName": "gone", "headRepository": null }
+            ] }
           }
         ] }
       }
@@ -389,6 +466,31 @@ mod tests {
         assert_eq!(issue.head_ref, None);
         assert_eq!(issue.reviewers, vec![]);
         assert_eq!(issue.reference(), "Issue #202");
+        assert_eq!(
+            issue.linked_branches,
+            vec!["202-login-screen"],
+            "branches of other repositories are left out"
+        );
+        assert_eq!(
+            issue.closing_pull_requests,
+            vec![PullRef {
+                number: 303,
+                head_ref: "login-redesign".into()
+            }],
+            "pull requests from forks are left out"
+        );
+        assert_eq!(pr.linked_branches, Vec::<String>::new());
+        assert_eq!(pr.closing_pull_requests, vec![]);
+    }
+
+    #[test]
+    fn the_query_asks_for_the_branches_of_issues() {
+        let issues = &GRAPHQL[GRAPHQL.find("assignedIssues").unwrap()..];
+        assert!(issues.contains("linkedBranches"), "{issues}");
+        assert!(
+            issues.contains("closedByPullRequestsReferences(first: 10, includeClosedPrs: false)"),
+            "{issues}"
+        );
     }
 
     #[test]

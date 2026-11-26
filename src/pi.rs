@@ -156,6 +156,8 @@ mod tests {
             is_draft: false,
             head_ref: None,
             reviewers: vec![],
+            linked_branches: vec![],
+            closing_pull_requests: vec![],
         }
     }
 
