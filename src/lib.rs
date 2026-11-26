@@ -3,6 +3,7 @@
 //! worktree in a Herdr worktree workspace.
 
 pub mod app;
+pub mod base_picker;
 pub mod config;
 pub mod github;
 pub mod herdr;

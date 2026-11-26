@@ -8,6 +8,7 @@ use ratatui::DefaultTerminal;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use herdr_gh_wt::app::{Action, App, Load};
+use herdr_gh_wt::base_picker::{BaseCandidate, BasePicker, PickerAction};
 use herdr_gh_wt::config::Config;
 use herdr_gh_wt::github::{self, Dashboard, Item};
 use herdr_gh_wt::herdr::{Herdr, PaneOpen};
@@ -100,9 +101,14 @@ fn dashboard() -> Result<()> {
                 fetch(&tx);
             }
             Ok(Some(Action::Browse(item))) => browse(&runner, &item, &mut app),
-            Ok(Some(Action::Open(item))) => {
+            Ok(Some(action @ (Action::Open(_) | Action::OpenWithBase(_)))) => {
+                let (item, choose_base) = match action {
+                    Action::OpenWithBase(item) => (item, true),
+                    Action::Open(item) => (item, false),
+                    _ => unreachable!(),
+                };
                 ratatui::restore();
-                if open(&opener, &item) {
+                if open(&opener, &item, choose_base) {
                     return Ok(());
                 }
                 terminal = ratatui::init();
@@ -146,8 +152,9 @@ fn browse(runner: &Arc<dyn Runner + Send + Sync>, item: &Item, app: &mut App) {
 }
 
 /// Open `item` outside the TUI so worktrunk's hooks and prompts are visible.
+/// With `choose_base`, a new issue branch starts from a branch the user picks.
 /// Returns true when the dashboard should exit.
-fn open(opener: &Opener, item: &Item) -> bool {
+fn open(opener: &Opener, item: &Item, choose_base: bool) -> bool {
     print!("\x1b[2J\x1b[H");
     println!(
         "\x1b[1mOpening {} {}\x1b[0m: {}\n",
@@ -159,14 +166,44 @@ fn open(opener: &Opener, item: &Item) -> bool {
         println!("\x1b[36m›\x1b[0m {line}");
         let _ = std::io::stdout().flush();
     };
-    match opener.open(item, &mut log) {
+    let mut pick = |candidates: &[BaseCandidate]| pick_base(item, candidates);
+    let result = if choose_base {
+        opener.open_with(item, Some(&mut pick), &mut log)
+    } else {
+        opener.open(item, &mut log)
+    };
+    match result {
         Ok(Outcome::Focused { .. } | Outcome::Opened { .. }) => true,
+        Ok(Outcome::Cancelled) => false,
         Err(err) => {
             println!("\n\x1b[31m✗ {err:#}\x1b[0m");
             wait_for_enter("\nPress Enter to return to the dashboard, or q and Enter to close.")
                 .eq_ignore_ascii_case("q")
         }
     }
+}
+
+/// Let the user pick the base branch in a full-screen picker; `None` cancels.
+fn pick_base(item: &Item, candidates: &[BaseCandidate]) -> Result<Option<String>> {
+    let mut picker = BasePicker::new(candidates.to_vec());
+    let mut terminal = ratatui::init();
+    let result = (|| loop {
+        terminal.draw(|frame| ui::render_base_picker(frame, &picker, item))?;
+        if let Event::Key(key) = event::read()?
+            && key.kind == KeyEventKind::Press
+        {
+            match picker.handle_key(key) {
+                PickerAction::Pick(base) => return Ok(Some(base)),
+                PickerAction::Cancel => return Ok(None),
+                PickerAction::None => {}
+            }
+        }
+    })();
+    ratatui::restore();
+    if let Ok(Some(base)) = &result {
+        println!("\x1b[36m›\x1b[0m Base branch: {base}");
+    }
+    result
 }
 
 /// Print `prompt` and wait for a line of input; returns what was typed.

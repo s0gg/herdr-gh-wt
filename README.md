@@ -35,6 +35,11 @@ workspace.
      git config (`branch.<name>.herdr-gh-wt-issue = <number>`). The next time
      you pick the same issue, it switches to that branch instead of creating a
      new one. Git removes the record when the branch is deleted.
+   - Issues opened with <kbd>b</kbd> instead of <kbd>Enter</kbd>: before the
+     plugin creates the branch, it runs `git fetch --all` and asks you for the
+     base (parent) branch, then runs
+     `wt switch --create <name> --base <base>`. See
+     [Choosing a base branch](#choosing-a-base-branch).
 5. **Open the worktree in Herdr.** The plugin runs
    `herdr worktree open --label <label> --focus`. pi writes the label (for
    example `PR #101 Add dark mode toggle`). pi starts working on the label
@@ -102,12 +107,35 @@ Then run `herdr server reload-config`.
 | `Tab` / `Shift+Tab`         | Switch between review requests and issues       |
 | `g` / `G`                   | First / last item of the list                   |
 | `Enter`                     | Open the item as a worktree workspace           |
+| `b`                         | Open an issue in a new branch, starting from a base branch you choose |
 | `o`                         | Open the item in the browser (`gh browse`)      |
 | `r`                         | Filter by repository                            |
 | `/`                         | Filter by text (repository, number, title, author, labels, branch) |
 | `R` / `F5`                  | Refresh                                         |
 | `Esc`                       | Clear filters, or close the dashboard           |
 | `q`                         | Close the dashboard                             |
+
+### Choosing a base branch
+
+By default, a new issue branch starts from the repository's default branch, as
+with `wt switch --create`. To start it somewhere else, for example on top of an
+epic branch, select the issue and press <kbd>b</kbd>.
+
+The plugin fetches every remote, then lists the branches you can start from.
+The default branch comes first, then local branches, then remote-tracking
+branches that have no local copy. Within each group, the most recently
+committed branches come first.
+
+- Type to filter the list, use <kbd>↑</kbd>/<kbd>↓</kbd> to choose, and press
+  <kbd>Enter</kbd> to create the branch from the selection.
+- To use a base that isn't listed, type it and press <kbd>Enter</kbd> when
+  nothing matches, or press <kbd>Alt</kbd>+<kbd>Enter</kbd> to use the typed
+  text even when something matches. worktrunk accepts any base, including
+  shortcuts such as `pr:123` and `^`.
+- <kbd>Esc</kbd> cancels and takes you back to the dashboard.
+
+If the issue already has a branch, the plugin opens that branch and says that
+the base was not used.
 
 ## Configuration
 
@@ -185,6 +213,7 @@ Source layout:
 
 - `src/github.rs`: the GraphQL query for review requests and assigned issues
 - `src/app.rs`: dashboard state and key handling
+- `src/base_picker.rs`: state of the base branch picker
 - `src/ui.rs`: rendering, with ratatui
 - `src/open.rs`: the open workflow (ghq, worktrunk, Herdr)
 - `src/pi.rs`: prompts and pi calls

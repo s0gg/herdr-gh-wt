@@ -12,9 +12,88 @@ use ratatui::widgets::{
 };
 
 use crate::app::{App, Load, Mode, Section, age, requested_via};
+use crate::base_picker::BasePicker;
 use crate::github::{Item, Kind};
 
 const ACCENT: Color = Color::Cyan;
+
+/// The full-screen picker for the base branch of a new issue branch.
+pub fn render_base_picker(frame: &mut Frame, picker: &BasePicker, item: &Item) {
+    let [header, prompt, list, footer] = Layout::vertical([
+        Constraint::Length(2),
+        Constraint::Length(1),
+        Constraint::Fill(1),
+        Constraint::Length(1),
+    ])
+    .areas(frame.area());
+
+    let title = Text::from(vec![
+        Line::from(vec![
+            Span::from(" New branch ")
+                .bold()
+                .fg(Color::Black)
+                .bg(ACCENT),
+            Span::from(format!(" {} {} ", item.repo, item.reference())).fg(Color::Blue),
+            Span::from(item.title.clone()).bold(),
+        ]),
+        Line::from(" Choose the base (parent) branch for the new branch.").dim(),
+    ]);
+    frame.render_widget(Paragraph::new(title), header);
+
+    frame.render_widget(
+        Paragraph::new(Line::from(vec![
+            Span::from(" base ❯ ").fg(ACCENT).bold(),
+            Span::from(picker.query.as_str()),
+            Span::from("█").fg(ACCENT),
+        ])),
+        prompt,
+    );
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::new().fg(ACCENT))
+        .title(Line::from(format!(" Branches ({}) ", picker.filtered().len())).bold());
+    let filtered = picker.filtered();
+    if filtered.is_empty() {
+        let typed = picker.query.trim();
+        let message = if typed.is_empty() {
+            "  No branches found. Type a base such as pr:123 or a commit.".to_string()
+        } else {
+            format!("  No branch matches; enter uses \"{typed}\" as the base.")
+        };
+        frame.render_widget(Paragraph::new(message).dim().block(block), list);
+    } else {
+        let entries: Vec<ListItem> = filtered
+            .iter()
+            .map(|c| {
+                let mut spans = vec![Span::from(c.name.clone())];
+                if c.is_default {
+                    spans.push(Span::from("  default").fg(Color::Green));
+                }
+                if c.remote {
+                    spans.push(Span::from("  remote").fg(Color::Yellow));
+                }
+                ListItem::new(Line::from(spans))
+            })
+            .collect();
+        let widget = List::new(entries)
+            .block(block)
+            .highlight_symbol("▶ ")
+            .highlight_style(Style::new().bg(Color::DarkGray).bold());
+        let mut state = ListState::default().with_selected(Some(picker.cursor()));
+        frame.render_stateful_widget(widget, list, &mut state);
+    }
+
+    frame.render_widget(
+        Paragraph::new(hints(&[
+            ("↑↓", "choose"),
+            ("enter", "create from it"),
+            ("alt-enter", "use the typed text"),
+            ("esc", "cancel"),
+        ])),
+        footer,
+    );
+}
 
 pub fn render(frame: &mut Frame, app: &App, now: SystemTime) {
     let [header, body, footer] = Layout::vertical([
@@ -121,6 +200,7 @@ fn render_footer(frame: &mut Frame, area: Rect, app: &App) {
             ("↑↓", "move"),
             ("tab", "section"),
             ("enter", "open worktree"),
+            ("b", "issue from base"),
             ("o", "browser"),
             ("r", "repository"),
             ("/", "search"),
@@ -471,6 +551,10 @@ mod tests {
         assert!(screen.contains("acme/lib"), "{screen}");
         assert!(screen.contains("@octocat"), "{screen}");
         assert!(screen.contains("3h"), "age column: {screen}");
+        assert!(
+            screen.contains("b issue from base"),
+            "footer hints: {screen}"
+        );
     }
 
     #[test]
@@ -535,6 +619,48 @@ mod tests {
         app.notice = Some("could not open the browser".into());
         let screen = draw(&app, 120, 30);
         assert!(screen.contains("could not open the browser"), "{screen}");
+    }
+
+    fn draw_picker(picker: &BasePicker, width: u16, height: u16) -> String {
+        let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
+        let item = sample().assigned_issues[0].clone();
+        terminal
+            .draw(|frame| render_base_picker(frame, picker, &item))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let mut text = String::new();
+        for y in 0..buffer.area.height {
+            for x in 0..buffer.area.width {
+                text.push_str(buffer[(x, y)].symbol());
+            }
+            text.push('\n');
+        }
+        text
+    }
+
+    #[test]
+    fn base_picker_lists_branches_with_their_kind() {
+        let picker = BasePicker::new(crate::base_picker::tests::candidates());
+        let screen = draw_picker(&picker, 100, 20);
+        assert!(screen.contains("Issue #10"), "{screen}");
+        assert!(screen.contains("Parser crashes"), "{screen}");
+        assert!(screen.contains("main"), "{screen}");
+        assert!(screen.contains("default"), "{screen}");
+        assert!(screen.contains("origin/epic/search-v2"), "{screen}");
+        assert!(screen.contains("remote"), "{screen}");
+        assert!(screen.contains("esc"), "hints: {screen}");
+    }
+
+    #[test]
+    fn base_picker_shows_the_query_and_the_typed_fallback() {
+        let mut picker = BasePicker::new(crate::base_picker::tests::candidates());
+        for c in "pr:123".chars() {
+            picker.handle_key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE));
+        }
+        let screen = draw_picker(&picker, 100, 20);
+        assert!(screen.contains("pr:123"), "{screen}");
+        assert!(screen.contains("No branch matches"), "{screen}");
+        draw_picker(&picker, 10, 3);
     }
 
     #[test]

@@ -4,7 +4,7 @@ use std::time::SystemTime;
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
-use crate::github::{Dashboard, Item, Reviewer};
+use crate::github::{Dashboard, Item, Kind, Reviewer};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Section {
@@ -52,6 +52,8 @@ pub enum Action {
     Quit,
     Refresh,
     Open(Item),
+    /// Open an issue in a new branch created from a base branch the user picks.
+    OpenWithBase(Item),
     Browse(Item),
 }
 
@@ -251,6 +253,18 @@ impl App {
                     return Action::Browse(item.clone());
                 }
             }
+            KeyCode::Char('b') => match self.selected_item() {
+                Some(item) if item.kind == Kind::Issue => {
+                    return Action::OpenWithBase(item.clone());
+                }
+                Some(_) => {
+                    self.notice = Some(
+                        "A base branch only applies to issues; pull requests use their own branch"
+                            .to_string(),
+                    );
+                }
+                None => {}
+            },
             _ => {}
         }
         Action::None
@@ -363,7 +377,6 @@ pub fn age(timestamp: &str, now: SystemTime) -> String {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
-    use crate::github::Kind;
 
     pub fn item(kind: Kind, repo: &str, number: u64, title: &str) -> Item {
         Item {
@@ -521,6 +534,26 @@ pub(crate) mod tests {
         assert!(matches!(press(&mut app, &[KeyCode::Enter]), Action::Open(i) if i.number == 1));
         assert!(
             matches!(press(&mut app, &[KeyCode::Char('o')]), Action::Browse(i) if i.number == 1)
+        );
+    }
+
+    #[test]
+    fn b_opens_an_issue_from_a_chosen_base() {
+        let mut app = loaded();
+        press(&mut app, &[KeyCode::Tab]);
+        assert!(
+            matches!(press(&mut app, &[KeyCode::Char('b')]), Action::OpenWithBase(i) if i.number == 10)
+        );
+    }
+
+    #[test]
+    fn b_on_a_pull_request_explains_itself() {
+        let mut app = loaded();
+        assert_eq!(press(&mut app, &[KeyCode::Char('b')]), Action::None);
+        assert!(
+            app.notice.as_deref().is_some_and(|n| n.contains("issue")),
+            "{:?}",
+            app.notice
         );
     }
 

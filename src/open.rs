@@ -6,8 +6,9 @@
 //! 2. Make sure Herdr has a workspace for the repository.
 //! 3. If the item's branch is already open in Herdr, focus that workspace.
 //! 4. Otherwise let worktrunk switch to (or create) the worktree — pull
-//!    requests via `wt switch pr:N`, issues via a branch named by pi — and open
-//!    it with `herdr worktree open`, labelled by pi.
+//!    requests via `wt switch pr:N`, issues via a branch named by pi and,
+//!    optionally, started from a base branch the user picks — and open it
+//!    with `herdr worktree open`, labelled by pi.
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
@@ -15,6 +16,7 @@ use std::sync::{Arc, mpsc};
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
 
+use crate::base_picker::BaseCandidate;
 use crate::config::PiConfig;
 use crate::github::{Item, Kind};
 use crate::herdr::{Herdr, WorktreeList};
@@ -32,7 +34,13 @@ pub enum Outcome {
     Focused { workspace_id: String },
     /// The worktree was opened as a new workspace.
     Opened { path: PathBuf, label: String },
+    /// The user backed out (for example of choosing a base branch).
+    Cancelled,
 }
+
+/// Asks the user for the base of a new issue branch among the candidates;
+/// `None` cancels.
+pub type ChooseBase<'a> = &'a mut dyn FnMut(&[BaseCandidate]) -> Result<Option<String>>;
 
 pub struct Opener {
     pub runner: Arc<dyn Runner + Send + Sync>,
@@ -43,6 +51,17 @@ pub struct Opener {
 impl Opener {
     /// Open `item`, reporting progress through `log`.
     pub fn open(&self, item: &Item, log: &mut dyn FnMut(&str)) -> Result<Outcome> {
+        self.open_with(item, None, log)
+    }
+
+    /// Like [`Opener::open`]; when a new issue branch is created,
+    /// `choose_base` picks the branch it starts from.
+    pub fn open_with(
+        &self,
+        item: &Item,
+        choose_base: Option<ChooseBase>,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Outcome> {
         let runner = &*self.runner;
         let repo_path = self.locate_repository(item, log)?;
         let list = self.herdr.worktree_list(runner, &repo_path)?;
@@ -61,6 +80,12 @@ impl Opener {
             Kind::PullRequest => item.head_ref.clone(),
             Kind::Issue => self.recorded_issue_branch(&root, item.number)?,
         };
+        if let (Kind::Issue, Some(branch), Some(_)) = (item.kind, &known_branch, &choose_base) {
+            log(&format!(
+                "Issue #{} already has branch {branch}; a base branch only applies to new branches",
+                item.number
+            ));
+        }
         if let Some(id) = known_branch
             .as_deref()
             .and_then(|b| open_workspace_of_branch(&list, b))
@@ -72,10 +97,23 @@ impl Opener {
         let target = match (item.kind, known_branch) {
             (Kind::PullRequest, _) => vec![format!("pr:{}", item.number)],
             (Kind::Issue, Some(branch)) => vec![branch],
-            (Kind::Issue, None) => vec![
-                "--create".to_string(),
-                self.new_issue_branch(&root, item, log),
-            ],
+            (Kind::Issue, None) => {
+                let base = match choose_base {
+                    Some(choose) => match self.ask_base(&root, choose, log)? {
+                        Some(base) => Some(base),
+                        None => return Ok(Outcome::Cancelled),
+                    },
+                    None => None,
+                };
+                let mut target = vec![
+                    "--create".to_string(),
+                    self.new_issue_branch(&root, item, log),
+                ];
+                if let Some(base) = base {
+                    target.extend(["--base".to_string(), base]);
+                }
+                target
+            }
         };
 
         // Name the workspace while worktrunk works; hooks can take a while.
@@ -220,6 +258,97 @@ impl Opener {
         }
     }
 
+    /// Refresh the remote-tracking branches and let `choose` pick a base.
+    fn ask_base(
+        &self,
+        root: &Path,
+        choose: ChooseBase,
+        log: &mut dyn FnMut(&str),
+    ) -> Result<Option<String>> {
+        log("Fetching remote branches...");
+        let fetched = self.runner.run(
+            &self
+                .git(root, &["fetch", "--all", "--quiet"])
+                .io(Io::Inherit),
+        );
+        match fetched {
+            Ok(out) if out.success => {}
+            Ok(_) => log("git fetch failed; offering the branches known locally"),
+            Err(err) => log(&format!(
+                "git fetch failed ({err:#}); offering the branches known locally"
+            )),
+        }
+        let candidates = self.base_candidates(root)?;
+        choose(&candidates)
+    }
+
+    /// Local branches, then remote-tracking branches without a local
+    /// counterpart, most recently committed first, with the default branch
+    /// moved to the top.
+    fn base_candidates(&self, root: &Path) -> Result<Vec<BaseCandidate>> {
+        let refs = self.runner.stdout(&self.git(
+            root,
+            &[
+                "for-each-ref",
+                "--sort=-committerdate",
+                "--format=%(refname)",
+                "refs/heads",
+                "refs/remotes",
+            ],
+        ))?;
+        let mut local = Vec::new();
+        let mut remote = Vec::new();
+        for reference in refs.lines().map(str::trim) {
+            if let Some(name) = reference.strip_prefix("refs/heads/") {
+                local.push(name);
+            } else if let Some(name) = reference.strip_prefix("refs/remotes/")
+                && !name.ends_with("/HEAD")
+            {
+                remote.push(name);
+            }
+        }
+        remote.retain(|name| {
+            !name
+                .split_once('/')
+                .is_some_and(|(_, branch)| local.contains(&branch))
+        });
+
+        let candidate = |name: &str, remote| BaseCandidate {
+            name: name.to_string(),
+            remote,
+            is_default: false,
+        };
+        let mut candidates: Vec<BaseCandidate> = local
+            .iter()
+            .map(|name| candidate(name, false))
+            .chain(remote.iter().map(|name| candidate(name, true)))
+            .collect();
+
+        let head = self.runner.run(&self.git(
+            root,
+            &[
+                "symbolic-ref",
+                "--quiet",
+                "--short",
+                "refs/remotes/origin/HEAD",
+            ],
+        ))?;
+        if head.success {
+            let head = head.stdout.trim();
+            let local_default = head.split_once('/').map(|(_, branch)| branch);
+            let default = candidates
+                .iter()
+                .position(|c| !c.remote && Some(c.name.as_str()) == local_default)
+                .or_else(|| candidates.iter().position(|c| c.remote && c.name == head));
+            if let Some(index) = default {
+                let mut default = candidates.remove(index);
+                default.is_default = true;
+                candidates.insert(0, default);
+            }
+        }
+        Ok(candidates)
+    }
+
     /// A fresh branch name for an issue: pi's slug, made unique.
     fn new_issue_branch(&self, root: &Path, item: &Item, log: &mut dyn FnMut(&str)) -> String {
         log("Asking pi for a branch name...");
@@ -309,6 +438,7 @@ fn same_path(a: &Path, b: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base_picker::BaseCandidate;
     use crate::config::Config;
     use crate::runner::Output;
     use crate::runner::fake::FakeRunner;
@@ -333,6 +463,11 @@ mod tests {
         wt_fails: bool,
         /// `gh config get git_protocol`
         git_protocol: String,
+        /// `git for-each-ref` output, newest first
+        refs: Vec<String>,
+        /// `git symbolic-ref refs/remotes/origin/HEAD`
+        origin_head: Option<String>,
+        fetch_fails: bool,
     }
 
     impl Default for World {
@@ -347,6 +482,17 @@ mod tests {
                 pi_branch: Ok("fix-login-timeout".into()),
                 wt_fails: false,
                 git_protocol: "https".into(),
+                refs: [
+                    "refs/heads/feature/login",
+                    "refs/remotes/origin/epic/x",
+                    "refs/heads/main",
+                    "refs/remotes/origin/HEAD",
+                    "refs/remotes/origin/main",
+                ]
+                .map(String::from)
+                .to_vec(),
+                origin_head: Some("origin/main".into()),
+                fetch_fails: false,
             }
         }
     }
@@ -440,6 +586,39 @@ mod tests {
                     .push((branch.to_string(), value.parse().unwrap()));
                 Output::ok("")
             }
+            ("git", ["fetch", "--all", "--quiet"]) => {
+                assert_eq!(cmd.io, Io::Inherit, "fetch can prompt for credentials");
+                if w.fetch_fails {
+                    Output::failed("could not read from remote")
+                } else {
+                    Output::ok("")
+                }
+            }
+            (
+                "git",
+                [
+                    "for-each-ref",
+                    "--sort=-committerdate",
+                    "--format=%(refname)",
+                    "refs/heads",
+                    "refs/remotes",
+                ],
+            ) => Output::ok(w.refs.iter().map(|r| format!("{r}\n")).collect::<String>()),
+            (
+                "git",
+                [
+                    "symbolic-ref",
+                    "--quiet",
+                    "--short",
+                    "refs/remotes/origin/HEAD",
+                ],
+            ) => match &w.origin_head {
+                Some(head) => Output::ok(format!("{head}\n")),
+                None => Output {
+                    success: false,
+                    ..Output::default()
+                },
+            },
             ("git", ["show-ref", "--verify", "--quiet", r]) => {
                 let branch = r.strip_prefix("refs/heads/").unwrap();
                 Output {
@@ -529,6 +708,10 @@ mod tests {
     }
 
     fn run(world: World, item: &Item) -> Run {
+        run_with(world, item, None)
+    }
+
+    fn run_with(world: World, item: &Item, choose_base: Option<ChooseBase>) -> Run {
         let world = Arc::new(Mutex::new(world));
         let shared = world.clone();
         let runner = Arc::new(FakeRunner::new(move |cmd| simulate(shared.clone(), cmd)));
@@ -538,7 +721,7 @@ mod tests {
             pi: Config::default().pi,
         };
         let mut log = Vec::new();
-        let outcome = opener.open(item, &mut |line| log.push(line.to_string()));
+        let outcome = opener.open_with(item, choose_base, &mut |line| log.push(line.to_string()));
         let world = world.lock().unwrap().clone();
         Run {
             outcome,
@@ -773,6 +956,137 @@ mod tests {
         );
         assert!(!ran(&r, "wt "));
         assert!(!ran(&r, "pi "));
+    }
+
+    fn candidate(name: &str, remote: bool, is_default: bool) -> BaseCandidate {
+        BaseCandidate {
+            name: name.into(),
+            remote,
+            is_default,
+        }
+    }
+
+    #[test]
+    fn creates_an_issue_branch_from_a_chosen_base() {
+        let mut offered = Vec::new();
+        let mut choose = |candidates: &[BaseCandidate]| {
+            offered = candidates.to_vec();
+            Ok(Some("origin/epic/x".to_string()))
+        };
+        let r = run_with(World::default(), &issue(), Some(&mut choose));
+        assert!(
+            matches!(r.outcome, Ok(Outcome::Opened { .. })),
+            "{:?}",
+            r.outcome
+        );
+        assert!(
+            ran(
+                &r,
+                "wt switch --create fix-login-timeout --base origin/epic/x --no-cd --format=json"
+            ),
+            "{:#?}",
+            r.lines
+        );
+        assert_eq!(
+            offered,
+            vec![
+                candidate("main", false, true),
+                candidate("feature/login", false, false),
+                candidate("origin/epic/x", true, false),
+            ],
+            "default first; origin/HEAD and remote copies of local branches are left out"
+        );
+        let fetch = r
+            .lines
+            .iter()
+            .position(|l| l.starts_with("git fetch"))
+            .expect("fetched");
+        let list = r
+            .lines
+            .iter()
+            .position(|l| l.starts_with("git for-each-ref"))
+            .unwrap();
+        assert!(fetch < list);
+        assert_eq!(
+            r.world.issue_map,
+            vec![("fix-login-timeout".to_string(), 42)]
+        );
+    }
+
+    #[test]
+    fn a_remote_only_default_branch_is_offered_first() {
+        let world = World {
+            refs: vec![
+                "refs/heads/feature/login".into(),
+                "refs/remotes/origin/main".into(),
+            ],
+            ..World::default()
+        };
+        let mut offered = Vec::new();
+        let mut choose = |candidates: &[BaseCandidate]| {
+            offered = candidates.to_vec();
+            Ok(None)
+        };
+        run_with(world, &issue(), Some(&mut choose));
+        assert_eq!(offered[0], candidate("origin/main", true, true));
+    }
+
+    #[test]
+    fn cancelling_the_base_choice_opens_nothing() {
+        let r = run_with(
+            World::default(),
+            &issue(),
+            Some(&mut |_: &[BaseCandidate]| Ok(None)),
+        );
+        assert_eq!(r.outcome.as_ref().unwrap(), &Outcome::Cancelled);
+        assert!(!ran(&r, "wt "), "{:#?}", r.lines);
+        assert!(!ran(&r, "pi "), "{:#?}", r.lines);
+    }
+
+    #[test]
+    fn the_base_choice_is_skipped_for_an_issue_that_has_a_branch() {
+        let mut world = World::default();
+        world.branches.push("login-fix".into());
+        world.issue_map.push(("login-fix".into(), 42));
+        let r = run_with(
+            world,
+            &issue(),
+            Some(
+                &mut |_: &[BaseCandidate]| -> anyhow::Result<Option<String>> {
+                    panic!("not asked")
+                },
+            ),
+        );
+        assert!(
+            matches!(r.outcome, Ok(Outcome::Opened { .. })),
+            "{:?}",
+            r.outcome
+        );
+        assert!(ran(&r, "wt switch login-fix --no-cd"), "{:#?}", r.lines);
+        assert!(
+            r.log
+                .iter()
+                .any(|l| l.contains("login-fix") && l.contains("base")),
+            "{:?}",
+            r.log
+        );
+    }
+
+    #[test]
+    fn a_failed_fetch_still_offers_the_known_branches() {
+        let world = World {
+            fetch_fails: true,
+            ..World::default()
+        };
+        let mut asked = false;
+        let mut choose = |_: &[BaseCandidate]| {
+            asked = true;
+            Ok(Some("main".to_string()))
+        };
+        let r = run_with(world, &issue(), Some(&mut choose));
+        assert!(asked);
+        assert!(r.outcome.is_ok(), "{:?}", r.outcome);
+        assert!(r.log.iter().any(|l| l.contains("fetch")), "{:?}", r.log);
     }
 
     #[test]
